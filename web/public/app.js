@@ -8,8 +8,14 @@ const assigneeInput = document.querySelector("#assignee");
 const dueDateInput = document.querySelector("#dueDate");
 const filterButtons = [...document.querySelectorAll(".filter")];
 
+/** Base URL for this deploy (works on GitHub project Pages under /chores/). */
+const BASE = new URL("./", import.meta.url);
+const STORAGE_KEY = "chores.household.v1";
+
 let filter = "open";
 let chores = [];
+/** @type {"api" | "local"} */
+let backend = "local";
 
 const checkIcon = `
   <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
@@ -31,8 +37,37 @@ function setStatus(message) {
   formStatus.textContent = message;
 }
 
+function newChoreId() {
+  return `chore_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function loadLocalStore() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return { chores: [] };
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed?.chores) ? { chores: parsed.chores } : { chores: [] };
+  } catch {
+    return { chores: [] };
+  }
+}
+
+function saveLocalStore(store) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+}
+
+function listLocal(status, assignee) {
+  const needle = assignee?.trim().toLowerCase();
+  return loadLocalStore().chores.filter((chore) => {
+    if (status !== "all" && chore.status !== status) return false;
+    if (needle) return (chore.assignee ?? "").toLowerCase() === needle;
+    return true;
+  });
+}
+
 async function api(path, options = {}) {
-  const response = await fetch(path, {
+  const url = new URL(path.replace(/^\//, ""), BASE);
+  const response = await fetch(url, {
     headers: {
       "content-type": "application/json",
       ...(options.headers ?? {}),
@@ -44,6 +79,25 @@ async function api(path, options = {}) {
     throw new Error(data.error || `Request failed (${response.status})`);
   }
   return data;
+}
+
+async function detectBackend() {
+  try {
+    const url = new URL(`api/chores?status=open`, BASE);
+    const response = await fetch(url, {
+      headers: { accept: "application/json" },
+      cache: "no-store",
+    });
+    if (response.ok) {
+      const data = await response.json();
+      if (typeof data?.count === "number" && Array.isArray(data.chores)) {
+        return "api";
+      }
+    }
+  } catch {
+    /* static host (GitHub Pages) or offline */
+  }
+  return "local";
 }
 
 function render() {
@@ -117,18 +171,33 @@ function render() {
 }
 
 async function loadChores() {
-  const data = await api(`/api/chores?status=${encodeURIComponent(filter)}`);
-  chores = data.chores ?? [];
+  if (backend === "api") {
+    const data = await api(`api/chores?status=${encodeURIComponent(filter)}`);
+    chores = data.chores ?? [];
+  } else {
+    chores = listLocal(filter);
+  }
   render();
 }
 
 async function toggleChore(chore) {
   const nextStatus = chore.status === "done" ? "open" : "done";
   try {
-    await api(`/api/chores/${encodeURIComponent(chore.id)}`, {
-      method: "PATCH",
-      body: JSON.stringify({ status: nextStatus }),
-    });
+    if (backend === "api") {
+      await api(`api/chores/${encodeURIComponent(chore.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: nextStatus }),
+      });
+    } else {
+      const store = loadLocalStore();
+      const index = store.chores.findIndex((item) => item.id === chore.id);
+      if (index < 0) throw new Error(`No chore with id ${chore.id}`);
+      const next = { ...store.chores[index], status: nextStatus };
+      if (nextStatus === "done") next.completedAt = new Date().toISOString();
+      else delete next.completedAt;
+      store.chores[index] = next;
+      saveLocalStore(store);
+    }
     setStatus(nextStatus === "done" ? "Marked done." : "Reopened.");
     await loadChores();
   } catch (error) {
@@ -157,14 +226,28 @@ form.addEventListener("submit", async (event) => {
   submit.disabled = true;
   setStatus("Saving…");
   try {
-    await api("/api/chores", {
-      method: "POST",
-      body: JSON.stringify({
-        title,
-        assignee: assigneeInput.value.trim() || undefined,
-        dueDate: dueDateInput.value || undefined,
-      }),
-    });
+    const payload = {
+      title,
+      assignee: assigneeInput.value.trim() || undefined,
+      dueDate: dueDateInput.value || undefined,
+    };
+    if (backend === "api") {
+      await api("api/chores", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    } else {
+      const store = loadLocalStore();
+      store.chores.push({
+        id: newChoreId(),
+        title: payload.title,
+        ...(payload.assignee ? { assignee: payload.assignee } : {}),
+        ...(payload.dueDate ? { dueDate: payload.dueDate } : {}),
+        status: "open",
+        createdAt: new Date().toISOString(),
+      });
+      saveLocalStore(store);
+    }
     form.reset();
     titleInput.focus();
     if (filter === "done") {
@@ -175,7 +258,7 @@ form.addEventListener("submit", async (event) => {
         item.setAttribute("aria-selected", active ? "true" : "false");
       });
     }
-    setStatus("Added.");
+    setStatus(backend === "local" ? "Added (saved on this device)." : "Added.");
     await loadChores();
   } catch (error) {
     setStatus(error.message);
@@ -186,13 +269,21 @@ form.addEventListener("submit", async (event) => {
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
-    void navigator.serviceWorker.register("/sw.js").catch(() => {
-      /* optional on local/dev */
-    });
+    void navigator.serviceWorker
+      .register(new URL("sw.js", BASE), { scope: BASE.pathname })
+      .catch(() => {
+        /* optional on local/dev */
+      });
   });
 }
 
-void loadChores().catch((error) => {
-  summaryEl.textContent = "Could not reach the chores server.";
+void (async () => {
+  backend = await detectBackend();
+  if (backend === "local") {
+    setStatus("Saved on this device (GitHub Pages / offline mode).");
+  }
+  await loadChores();
+})().catch((error) => {
+  summaryEl.textContent = "Could not load chores.";
   setStatus(error.message);
 });

@@ -1,6 +1,6 @@
 import { defineTool } from "@cursor/bdk/tools";
 import { z } from "zod";
-import { loadStore } from "../lib/store.js";
+import { listChores, loadStore } from "../lib/store.js";
 
 export default defineTool({
   description:
@@ -18,16 +18,7 @@ export default defineTool({
   }),
   async execute({ status, assignee }, ctx) {
     const store = await loadStore(ctx.host.kv);
-    const needle = assignee?.trim().toLowerCase();
-    const chores = store.chores.filter((chore) => {
-      if (status !== "all" && chore.status !== status) {
-        return false;
-      }
-      if (needle !== undefined && needle.length > 0) {
-        return (chore.assignee ?? "").toLowerCase() === needle;
-      }
-      return true;
-    });
+    const chores = listChores(store, { status, assignee });
     return {
       count: chores.length,
       chores,

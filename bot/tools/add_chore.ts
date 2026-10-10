@@ -1,6 +1,6 @@
 import { defineTool } from "@cursor/bdk/tools";
 import { z } from "zod";
-import { loadStore, newChoreId, saveStore } from "../lib/store.js";
+import { addChore, loadStore, saveStore } from "../lib/store.js";
 
 export default defineTool({
   description:
@@ -20,17 +20,13 @@ export default defineTool({
   }),
   async execute({ title, description, assignee, dueDate }, ctx) {
     const store = await loadStore(ctx.host.kv);
-    const chore = {
-      id: newChoreId(),
-      title: title.trim(),
-      ...(description?.trim() ? { description: description.trim() } : {}),
-      ...(assignee?.trim() ? { assignee: assignee.trim() } : {}),
-      status: "open" as const,
-      ...(dueDate?.trim() ? { dueDate: dueDate.trim() } : {}),
-      createdAt: new Date().toISOString(),
-    };
-    store.chores.push(chore);
-    await saveStore(ctx.host.kv, store);
+    const { store: next, chore } = addChore(store, {
+      title,
+      description,
+      assignee,
+      dueDate,
+    });
+    await saveStore(ctx.host.kv, next);
     return { ok: true as const, chore };
   },
 });

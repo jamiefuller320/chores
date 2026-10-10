@@ -1,12 +1,14 @@
 # chores
 
 Bot Development Kit (BDK) project (`@cursor/bdk`) for household chore
-tracking. This file is for coding agents editing the project. The served
-agent's prompt is `bot/instructions.md`.
+tracking, with a web-first PWA under `web/` for iPhone/iPad. This file is
+for coding agents editing the project. The served agent's prompt is
+`bot/instructions.md`.
 
 ## Loop
 
 ```bash
+npm run web
 bdk validate --dir .
 bdk info --dir . --json
 bdk run --dir . --message "..."

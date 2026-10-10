@@ -1,29 +1,22 @@
 import type { ToolContext } from "@cursor/bdk/tools";
+import {
+  emptyStore,
+  type Chore,
+  type ChoreStore,
+} from "./chores.js";
 
-export type ChoreStatus = "open" | "done";
-
-export type Chore = {
-  id: string;
-  title: string;
-  description?: string;
-  assignee?: string;
-  status: ChoreStatus;
-  dueDate?: string;
-  createdAt: string;
-  completedAt?: string;
-};
+export type { Chore, ChoreStatus, ChoreStore } from "./chores.js";
+export {
+  addChore,
+  emptyStore,
+  listChores,
+  newChoreId,
+  updateChore,
+} from "./chores.js";
 
 const CHORES_KEY = "household/chores";
 
-export type ChoreStore = {
-  chores: Chore[];
-};
-
 type HostKv = ToolContext["host"]["kv"];
-
-function emptyStore(): ChoreStore {
-  return { chores: [] };
-}
 
 export async function loadStore(kv: HostKv): Promise<ChoreStore> {
   const raw = await kv.get(CHORES_KEY);
@@ -39,8 +32,4 @@ export async function loadStore(kv: HostKv): Promise<ChoreStore> {
 
 export async function saveStore(kv: HostKv, store: ChoreStore): Promise<void> {
   await kv.put(CHORES_KEY, store);
-}
-
-export function newChoreId(): string {
-  return `chore_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }

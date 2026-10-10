@@ -2,14 +2,15 @@
   "name": "Chores",
   "short_name": "Chores",
   "description": "Household chore tracking for iPhone and iPad.",
-  "start_url": "/",
+  "start_url": "./",
+  "scope": "./",
   "display": "standalone",
   "background_color": "#d9ebe3",
   "theme_color": "#1f6f5b",
   "orientation": "any",
   "icons": [
     {
-      "src": "/icon.svg",
+      "src": "./icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any maskable"

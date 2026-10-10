@@ -1,12 +1,13 @@
-const CACHE = "chores-shell-v1";
+const CACHE = "chores-shell-v2";
+const BASE = new URL("./", self.location.href);
 const ASSETS = [
-  "/",
-  "/index.html",
-  "/styles.css",
-  "/app.js",
-  "/manifest.webmanifest",
-  "/icon.svg",
-];
+  "./",
+  "./index.html",
+  "./styles.css",
+  "./app.js",
+  "./manifest.webmanifest",
+  "./icon.svg",
+].map((path) => new URL(path, BASE).href);
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS)));
@@ -26,7 +27,7 @@ self.addEventListener("fetch", (event) => {
   const { request } = event;
   if (request.method !== "GET") return;
   const url = new URL(request.url);
-  if (url.pathname.startsWith("/api/")) return;
+  if (url.pathname.includes("/api/")) return;
 
   event.respondWith(
     caches.match(request).then((cached) => {

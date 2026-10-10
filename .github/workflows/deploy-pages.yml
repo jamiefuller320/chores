@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "web/public/**"
+      - "supabase/**"
       - ".github/workflows/deploy-pages.yml"
   workflow_dispatch:
 
@@ -26,6 +27,30 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Write Supabase config from secrets
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          CHORES_POLL_MS: ${{ vars.CHORES_POLL_MS }}
+        run: |
+          node <<'EOF'
+          const fs = require("fs");
+          const cfg = {
+            supabaseUrl: process.env.SUPABASE_URL || "",
+            supabaseAnonKey: process.env.SUPABASE_ANON_KEY || "",
+            pollIntervalMs: Number(process.env.CHORES_POLL_MS || 10000) || 10000,
+          };
+          fs.writeFileSync(
+            "web/public/config.js",
+            `window.CHORES_CONFIG = ${JSON.stringify(cfg, null, 2)};\n`,
+          );
+          if (!cfg.supabaseUrl || !cfg.supabaseAnonKey) {
+            console.log("No Supabase secrets set; Pages will use localStorage fallback.");
+          } else {
+            console.log("Wrote Supabase config for Pages deploy.");
+          }
+          EOF
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

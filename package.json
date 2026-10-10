@@ -1,0 +1,20 @@
+{
+  "name": "chores",
+  "private": true,
+  "type": "module",
+  "description": "Household chore tracking — web UI for iPhone/iPad plus BDK assistant",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "dev": "bdk dev",
+    "web": "tsx web/server.ts",
+    "start:web": "tsx web/server.ts"
+  },
+  "dependencies": {
+    "@cursor/bdk": "^0.2.23",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "typescript": "6.0.3"
+  }
+}

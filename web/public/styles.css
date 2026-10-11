@@ -99,9 +99,118 @@ body {
 
 .identity {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.55rem;
   align-self: flex-start;
+}
+
+.admin-hint {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--accent-deep);
+}
+
+.recurrence-fields,
+.points-fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.55rem;
+  margin-top: 0.45rem;
+}
+
+.recurrence-fields input[type="number"],
+.points-fields input[type="number"] {
+  width: 4.5rem;
+  min-width: 4.5rem;
+  min-height: 40px;
+  padding: 0.35rem 0.55rem;
+}
+
+.field-hint {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+}
+
+.people-add {
+  margin-top: 0.75rem;
+  padding-top: 0.55rem;
+  border-top: 1px dashed var(--line);
+}
+
+.people-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.people-add-row input {
+  flex: 1 1 8rem;
+  min-height: 40px;
+}
+
+.scoreboard {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.score-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 0.95rem 1.05rem;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  animation: pop 320ms ease-out both;
+}
+
+.score-name {
+  margin: 0;
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.score-role {
+  margin: 0.15rem 0 0;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+
+.score-points {
+  font-family: var(--font-display);
+  font-size: 1.55rem;
+  font-weight: 700;
+  color: var(--accent-deep);
+  letter-spacing: -0.02em;
+}
+
+.meta-pill.is-pending {
+  color: #8a4b2a;
+}
+
+.meta-pill.is-approved {
+  color: var(--accent-deep);
+}
+
+.assess-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 0.55rem;
+}
+
+.assess-actions .text-btn.is-reject {
+  color: #8a4b2a;
 }
 
 .identity-label {

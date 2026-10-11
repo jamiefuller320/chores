@@ -14,12 +14,15 @@
  */
 
 import {
+  type AssessmentStatus,
   type CompletionEvent,
   type HouseholdModelStore,
   type Person,
+  type RecurrenceUnit,
   type TaskInstance,
   type TaskTemplate,
   type TemplateStep,
+  DEFAULT_TASK_POINTS,
   emptyModelStore,
 } from "./model.js";
 
@@ -113,6 +116,14 @@ function rowToTemplate(row: Record<string, unknown>): TaskTemplate {
     ...(row.cooldown_days != null
       ? { cooldownDays: Number(row.cooldown_days) }
       : {}),
+    ...(row.recurrence_interval != null
+      ? { recurrenceInterval: Number(row.recurrence_interval) }
+      : {}),
+    ...(row.recurrence_unit
+      ? { recurrenceUnit: row.recurrence_unit as RecurrenceUnit }
+      : {}),
+    points:
+      row.points != null ? Number(row.points) : DEFAULT_TASK_POINTS,
     ...(row.estimated_minutes != null
       ? { estimatedMinutes: Number(row.estimated_minutes) }
       : {}),
@@ -182,6 +193,15 @@ function rowToCompletion(row: Record<string, unknown>): CompletionEvent {
     ...(row.proof_expires_at
       ? { proofExpiresAt: String(row.proof_expires_at) }
       : {}),
+    assessmentStatus:
+      (row.assessment_status as AssessmentStatus | undefined) ?? "pending",
+    ...(row.points_awarded != null
+      ? { pointsAwarded: Number(row.points_awarded) }
+      : {}),
+    ...(row.assessed_by_person_id
+      ? { assessedByPersonId: String(row.assessed_by_person_id) }
+      : {}),
+    ...(row.assessed_at ? { assessedAt: String(row.assessed_at) } : {}),
     createdAt: String(row.created_at),
   };
 }

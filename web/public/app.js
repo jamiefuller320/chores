@@ -892,6 +892,12 @@ async function api(path, options = {}) {
 }
 
 async function detectBackend() {
+  // Escape hatch for demos / offline rich UI: ?local=1 or localStorage flag.
+  const forceLocal =
+    new URLSearchParams(location.search).get("local") === "1" ||
+    localStorage.getItem("chores.forceLocal") === "1";
+  if (forceLocal) return "local";
+
   if (supabaseConfigured()) {
     try {
       await supabaseRequest("people?select=id&limit=1");

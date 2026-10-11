@@ -11,11 +11,14 @@ const filterButtons = [...document.querySelectorAll(".filter")];
 /** Base URL for this deploy (works on GitHub project Pages under /chores/). */
 const BASE = new URL("./", import.meta.url);
 const STORAGE_KEY = "chores.household.v1";
+const CONFIG = window.CHORES_CONFIG ?? {};
 
 let filter = "open";
 let chores = [];
-/** @type {"api" | "local"} */
+/** @type {"supabase" | "api" | "local"} */
 let backend = "local";
+/** @type {ReturnType<typeof setInterval> | null} */
+let pollTimer = null;
 
 const checkIcon = `
   <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
@@ -41,6 +44,111 @@ function newChoreId() {
   return `chore_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function supabaseConfigured() {
+  return Boolean(CONFIG.supabaseUrl?.trim() && CONFIG.supabaseAnonKey?.trim());
+}
+
+function supabaseHeaders(extra = {}) {
+  const key = CONFIG.supabaseAnonKey.trim();
+  return {
+    apikey: key,
+    Authorization: `Bearer ${key}`,
+    "Content-Type": "application/json",
+    ...extra,
+  };
+}
+
+function rowToChore(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    ...(row.description ? { description: row.description } : {}),
+    ...(row.assignee ? { assignee: row.assignee } : {}),
+    status: row.status,
+    ...(row.due_date ? { dueDate: row.due_date } : {}),
+    createdAt: row.created_at,
+    ...(row.completed_at ? { completedAt: row.completed_at } : {}),
+  };
+}
+
+function choreToRow(chore) {
+  return {
+    id: chore.id,
+    title: chore.title,
+    description: chore.description ?? null,
+    assignee: chore.assignee ?? null,
+    status: chore.status,
+    due_date: chore.dueDate ?? null,
+    created_at: chore.createdAt,
+    completed_at: chore.completedAt ?? null,
+  };
+}
+
+async function supabaseRequest(path, options = {}) {
+  const url = new URL(path, `${CONFIG.supabaseUrl.replace(/\/$/, "")}/rest/v1/`);
+  const response = await fetch(url, {
+    ...options,
+    headers: supabaseHeaders(options.headers),
+  });
+  if (response.status === 204) return null;
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message =
+      data?.message || data?.error_description || data?.hint || `Supabase ${response.status}`;
+    throw new Error(message);
+  }
+  return data;
+}
+
+async function listSupabase(status) {
+  let path = "chores?select=*&order=created_at.desc";
+  if (status !== "all") {
+    path += `&status=eq.${encodeURIComponent(status)}`;
+  }
+  const rows = await supabaseRequest(path);
+  return (rows ?? []).map(rowToChore);
+}
+
+async function addSupabase(input) {
+  const chore = {
+    id: newChoreId(),
+    title: input.title.trim(),
+    ...(input.assignee ? { assignee: input.assignee } : {}),
+    ...(input.dueDate ? { dueDate: input.dueDate } : {}),
+    status: "open",
+    createdAt: new Date().toISOString(),
+  };
+  const rows = await supabaseRequest("chores", {
+    method: "POST",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify(choreToRow(chore)),
+  });
+  return rowToChore(rows[0]);
+}
+
+async function updateSupabase(id, patch) {
+  const body = {};
+  if (patch.status !== undefined) {
+    body.status = patch.status;
+    body.completed_at =
+      patch.status === "done" ? new Date().toISOString() : null;
+  }
+  if (patch.title !== undefined) body.title = patch.title;
+  if (patch.assignee !== undefined) body.assignee = patch.assignee || null;
+  if (patch.dueDate !== undefined) body.due_date = patch.dueDate || null;
+
+  const rows = await supabaseRequest(
+    `chores?id=eq.${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!rows?.length) throw new Error(`No chore with id ${id}`);
+  return rowToChore(rows[0]);
+}
+
 function loadLocalStore() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -56,11 +164,9 @@ function saveLocalStore(store) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
 }
 
-function listLocal(status, assignee) {
-  const needle = assignee?.trim().toLowerCase();
+function listLocal(status) {
   return loadLocalStore().chores.filter((chore) => {
     if (status !== "all" && chore.status !== status) return false;
-    if (needle) return (chore.assignee ?? "").toLowerCase() === needle;
     return true;
   });
 }
@@ -82,8 +188,16 @@ async function api(path, options = {}) {
 }
 
 async function detectBackend() {
+  if (supabaseConfigured()) {
+    try {
+      await listSupabase("open");
+      return "supabase";
+    } catch (error) {
+      console.warn("Supabase unavailable, falling back", error);
+    }
+  }
   try {
-    const url = new URL(`api/chores?status=open`, BASE);
+    const url = new URL("api/chores?status=open", BASE);
     const response = await fetch(url, {
       headers: { accept: "application/json" },
       cache: "no-store",
@@ -95,15 +209,14 @@ async function detectBackend() {
       }
     }
   } catch {
-    /* static host (GitHub Pages) or offline */
+    /* static host */
   }
   return "local";
 }
 
 function render() {
   listEl.innerHTML = "";
-  const visible = chores;
-  emptyEl.classList.toggle("hidden", visible.length > 0);
+  emptyEl.classList.toggle("hidden", chores.length > 0);
 
   const openCount = chores.filter((chore) => chore.status === "open").length;
   if (filter === "open") {
@@ -117,7 +230,7 @@ function render() {
     summaryEl.textContent = "Everything on the household board.";
   }
 
-  for (const chore of visible) {
+  for (const chore of chores) {
     const li = document.createElement("li");
     li.className = `chore${chore.status === "done" ? " is-done" : ""}`;
     li.dataset.id = chore.id;
@@ -162,28 +275,33 @@ function render() {
     }
 
     body.append(title);
-    if (meta.childNodes.length > 0) {
-      body.append(meta);
-    }
+    if (meta.childNodes.length > 0) body.append(meta);
     li.append(button, body);
     listEl.append(li);
   }
 }
 
-async function loadChores() {
-  if (backend === "api") {
+async function loadChores({ quiet = false } = {}) {
+  if (backend === "supabase") {
+    chores = await listSupabase(filter);
+  } else if (backend === "api") {
     const data = await api(`api/chores?status=${encodeURIComponent(filter)}`);
     chores = data.chores ?? [];
   } else {
     chores = listLocal(filter);
   }
   render();
+  if (!quiet && backend === "supabase") {
+    setStatus("Synced with Supabase.");
+  }
 }
 
 async function toggleChore(chore) {
   const nextStatus = chore.status === "done" ? "open" : "done";
   try {
-    if (backend === "api") {
+    if (backend === "supabase") {
+      await updateSupabase(chore.id, { status: nextStatus });
+    } else if (backend === "api") {
       await api(`api/chores/${encodeURIComponent(chore.id)}`, {
         method: "PATCH",
         body: JSON.stringify({ status: nextStatus }),
@@ -199,10 +317,23 @@ async function toggleChore(chore) {
       saveLocalStore(store);
     }
     setStatus(nextStatus === "done" ? "Marked done." : "Reopened.");
-    await loadChores();
+    await loadChores({ quiet: true });
   } catch (error) {
     setStatus(error.message);
   }
+}
+
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  const ms = Number(CONFIG.pollIntervalMs) || 10000;
+  if (backend !== "supabase" || ms < 2000) return;
+
+  pollTimer = setInterval(() => {
+    if (document.visibilityState === "hidden") return;
+    void loadChores({ quiet: true }).catch((error) => {
+      console.warn("Poll failed", error);
+    });
+  }, ms);
 }
 
 filterButtons.forEach((button) => {
@@ -213,7 +344,7 @@ filterButtons.forEach((button) => {
       item.classList.toggle("is-active", active);
       item.setAttribute("aria-selected", active ? "true" : "false");
     });
-    void loadChores().catch((error) => setStatus(error.message));
+    void loadChores({ quiet: true }).catch((error) => setStatus(error.message));
   });
 });
 
@@ -231,7 +362,9 @@ form.addEventListener("submit", async (event) => {
       assignee: assigneeInput.value.trim() || undefined,
       dueDate: dueDateInput.value || undefined,
     };
-    if (backend === "api") {
+    if (backend === "supabase") {
+      await addSupabase(payload);
+    } else if (backend === "api") {
       await api("api/chores", {
         method: "POST",
         body: JSON.stringify(payload),
@@ -258,8 +391,14 @@ form.addEventListener("submit", async (event) => {
         item.setAttribute("aria-selected", active ? "true" : "false");
       });
     }
-    setStatus(backend === "local" ? "Added (saved on this device)." : "Added.");
-    await loadChores();
+    setStatus(
+      backend === "supabase"
+        ? "Added (synced)."
+        : backend === "local"
+          ? "Added (saved on this device)."
+          : "Added.",
+    );
+    await loadChores({ quiet: true });
   } catch (error) {
     setStatus(error.message);
   } finally {
@@ -267,22 +406,29 @@ form.addEventListener("submit", async (event) => {
   }
 });
 
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && backend === "supabase") {
+    void loadChores({ quiet: true }).catch(() => {});
+  }
+});
+
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     void navigator.serviceWorker
       .register(new URL("sw.js", BASE), { scope: BASE.pathname })
-      .catch(() => {
-        /* optional on local/dev */
-      });
+      .catch(() => {});
   });
 }
 
 void (async () => {
   backend = await detectBackend();
-  if (backend === "local") {
-    setStatus("Saved on this device (GitHub Pages / offline mode).");
+  if (backend === "supabase") {
+    setStatus("Connected to Supabase. Polling for updates…");
+    startPolling();
+  } else if (backend === "local") {
+    setStatus("Saved on this device (no Supabase / API).");
   }
-  await loadChores();
+  await loadChores({ quiet: true });
 })().catch((error) => {
   summaryEl.textContent = "Could not load chores.";
   setStatus(error.message);

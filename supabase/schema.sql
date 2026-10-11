@@ -10,6 +10,7 @@
 --
 -- Safe to re-run. Keeps legacy `public.chores` and adds people / templates /
 -- instances / completion_events for the richer chore model.
+-- This slice also adds: template recurrence + points; completion assessment.
 
 -- ---------------------------------------------------------------------------
 -- Legacy flat board (Pages fallback + older clients)
@@ -116,7 +117,16 @@ create table if not exists public.task_templates (
   parent_template_id text references public.task_templates (id) on delete set null,
   kind text not null default 'once'
     check (kind in ('daily', 'periodic', 'once')),
+  -- Legacy day-based cooldown (kept for nudges / older clients).
+  -- Prefer recurrence_interval + recurrence_unit; sync cooldown_days on write.
   cooldown_days integer,
+  -- Periodic default product rule: every 4 weeks (custom N day|week allowed).
+  recurrence_interval integer,
+  recurrence_unit text
+    check (recurrence_unit is null or recurrence_unit in ('day', 'week')),
+  -- Reward points (admin/parent sets); awarded on assessment approve.
+  points integer not null default 1
+    check (points >= 0),
   estimated_minutes integer,
   effort_weight numeric not null default 1,
   steps jsonb not null default '[]'::jsonb,
@@ -127,6 +137,34 @@ create table if not exists public.task_templates (
   active boolean not null default true,
   created_at timestamptz not null default now()
 );
+
+-- Additive columns when the table already existed without them.
+alter table public.task_templates
+  add column if not exists recurrence_interval integer;
+alter table public.task_templates
+  add column if not exists recurrence_unit text;
+alter table public.task_templates
+  add column if not exists points integer not null default 1;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'task_templates_recurrence_unit_check'
+  ) then
+    alter table public.task_templates
+      add constraint task_templates_recurrence_unit_check
+      check (recurrence_unit is null or recurrence_unit in ('day', 'week'));
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'task_templates_points_check'
+  ) then
+    alter table public.task_templates
+      add constraint task_templates_points_check
+      check (points >= 0);
+  end if;
+end $$;
 
 create index if not exists task_templates_parent_idx
   on public.task_templates (parent_template_id);
@@ -237,8 +275,36 @@ create table if not exists public.completion_events (
   estimated_minutes_at_start integer,
   proof_photo_path text,
   proof_expires_at timestamptz,
+  -- Points land on the scoreboard only after parent/admin assessment.
+  assessment_status text not null default 'pending'
+    check (assessment_status in ('pending', 'approved', 'rejected')),
+  points_awarded integer,
+  assessed_by_person_id text references public.people (id) on delete set null,
+  assessed_at timestamptz,
   created_at timestamptz not null default now()
 );
+
+alter table public.completion_events
+  add column if not exists assessment_status text not null default 'pending';
+alter table public.completion_events
+  add column if not exists points_awarded integer;
+alter table public.completion_events
+  add column if not exists assessed_by_person_id text
+    references public.people (id) on delete set null;
+alter table public.completion_events
+  add column if not exists assessed_at timestamptz;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'completion_events_assessment_status_check'
+  ) then
+    alter table public.completion_events
+      add constraint completion_events_assessment_status_check
+      check (assessment_status in ('pending', 'approved', 'rejected'));
+  end if;
+end $$;
 
 create index if not exists completion_events_instance_idx
   on public.completion_events (instance_id);
@@ -247,6 +313,11 @@ create index if not exists completion_events_template_idx
 create index if not exists completion_events_proof_expires_idx
   on public.completion_events (proof_expires_at)
   where proof_photo_path is not null;
+create index if not exists completion_events_assessment_idx
+  on public.completion_events (assessment_status);
+create index if not exists completion_events_person_awarded_idx
+  on public.completion_events (person_id)
+  where assessment_status = 'approved';
 
 alter table public.completion_events enable row level security;
 

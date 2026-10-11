@@ -16,16 +16,21 @@ free-tier project limit is full. Do **not** use the home_learning project.
 2. **SQL → New query**  
 3. Paste [`supabase/schema.sql`](supabase/schema.sql) → **Run**
 
-This creates:
+This creates / updates:
 
 | Object | Purpose |
 | --- | --- |
 | `public.chores` | Legacy flat board (kept for compatibility) |
-| `public.people` | Household members |
-| `public.task_templates` | Recurring kinds + ordered **steps** + **reference photo** path |
-| `public.task_instances` | Open / assigned / done work (self-assign lives here) |
-| `public.completion_events` | Completion history + optional **proof photo** (temporary) |
+| `public.people` | Household members (`parent` = **admin**, `child`, `other`) |
+| `public.task_templates` | Kinds + **recurrence** (default periodic **4 weeks**) + **points** + steps + reference photo |
+| `public.task_instances` | Open / assigned / done / waiting work (self-assign lives here) |
+| `public.completion_events` | Completions + proof photo TTL + **assessment** / **points_awarded** |
 | Storage bucket `chore-photos` | Reference (durable) + proof (TTL) images |
+
+**Re-run this SQL on School Compass** whenever schema columns change (safe to
+re-run). New columns in this slice: `recurrence_interval`, `recurrence_unit`,
+`points` on templates; `assessment_status`, `points_awarded`,
+`assessed_by_person_id`, `assessed_at` on completion events.
 
 If the Storage bucket insert fails on your plan, create a **public** bucket named
 `chore-photos` in **Storage → New bucket** (5 MB, image MIME types).
@@ -53,6 +58,10 @@ to the tab — so iPhone and iPad stay aligned without localhost.
 - **Self-assign** — pick “I am …” then **I’ll do it** on an open task (assign-by-name still works).
 - **Template steps** + **reference photo** — “what good looks like” on add (under *Steps & standard photo*).
 - **Proof photo** on complete — optional; retained **~7 days** or until the next completion for that template (whichever first).
+- **Recurrence** — periodic tasks default to **every 4 weeks**; custom every **N days** or **N weeks**. Completing a recurring task schedules the next cycle (`waiting` until due).
+- **Points + scoreboard** — each task has a point value; **Scores** tab shows running totals per person.
+- **Assessment** — completing a task leaves it **pending**; points count only after a **parent** approves (or rejects).
+- **Admin = parent** — only when “I am …” is a person with role **parent** can you set points or assess. v1 has no full Auth; this is a household-device identity gate (anon RLS still allows writes). Add parents under *Household people* in the composer.
 
 ## Backend priority
 

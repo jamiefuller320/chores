@@ -19,19 +19,32 @@ export {
 } from "./chores.js";
 
 export {
+  assessCompletion,
   assignByName,
   completeInstance,
   emptyModelStore,
+  formatRecurrenceLabel,
+  isAdminRole,
   listOpenInstances,
   noticeTask,
+  promoteDueWaiting,
+  resolveRecurrence,
+  scoreboard,
   selfAssign,
+  setTemplatePoints,
+  DEFAULT_PERIODIC_INTERVAL,
+  DEFAULT_PERIODIC_UNIT,
+  DEFAULT_TASK_POINTS,
   PROOF_PHOTO_TTL_DAYS,
 } from "./model.js";
 
 export type {
+  AssessmentStatus,
   CompletionEvent,
   HouseholdModelStore,
   Person,
+  RecurrenceUnit,
+  ScoreboardRow,
   TaskInstance,
   TaskTemplate,
 } from "./model.js";

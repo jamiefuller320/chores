@@ -1,4 +1,5 @@
 const listEl = document.querySelector("#chore-list");
+const scoreboardEl = document.querySelector("#scoreboard");
 const emptyEl = document.querySelector("#empty-state");
 const summaryEl = document.querySelector("#summary");
 const form = document.querySelector("#add-form");
@@ -7,9 +8,18 @@ const titleInput = document.querySelector("#title");
 const assigneeInput = document.querySelector("#assignee");
 const dueDateInput = document.querySelector("#dueDate");
 const kindInput = document.querySelector("#kind");
+const recurrenceFields = document.querySelector("#recurrence-fields");
+const recurrenceIntervalInput = document.querySelector("#recurrenceInterval");
+const recurrenceUnitInput = document.querySelector("#recurrenceUnit");
+const pointsFields = document.querySelector("#points-fields");
+const pointsInput = document.querySelector("#points");
 const stepsInput = document.querySelector("#steps");
 const referencePhotoInput = document.querySelector("#referencePhoto");
+const personNameInput = document.querySelector("#personName");
+const personRoleInput = document.querySelector("#personRole");
+const addPersonBtn = document.querySelector("#add-person");
 const meSelect = document.querySelector("#me-person");
+const adminHint = document.querySelector("#admin-hint");
 const filterButtons = [...document.querySelectorAll(".filter")];
 const completeDialog = document.querySelector("#complete-dialog");
 const completeForm = document.querySelector("#complete-form");
@@ -24,6 +34,9 @@ const ME_KEY = "chores.me.personId";
 const CONFIG = window.CHORES_CONFIG ?? {};
 const PROOF_TTL_DAYS = 7;
 const PHOTO_BUCKET = "chore-photos";
+const DEFAULT_PERIODIC_INTERVAL = 4;
+const DEFAULT_PERIODIC_UNIT = "week";
+const DEFAULT_TASK_POINTS = 1;
 
 let filter = "open";
 /** @type {Array<Record<string, unknown>>} */
@@ -32,6 +45,10 @@ let chores = [];
 let people = [];
 /** @type {Map<string, Record<string, unknown>>} */
 let templatesById = new Map();
+/** @type {Array<Record<string, unknown>>} */
+let completions = [];
+/** @type {Array<{personId: string, displayName: string, role: string, points: number}>} */
+let scoreRows = [];
 /** @type {"supabase-rich" | "supabase" | "api" | "local"} */
 let backend = "local";
 /** @type {ReturnType<typeof setInterval> | null} */
@@ -47,7 +64,9 @@ const checkIcon = `
 
 function formatDue(dueDate) {
   if (!dueDate) return null;
-  const date = new Date(`${dueDate}T12:00:00`);
+  const date = new Date(
+    dueDate.includes("T") ? dueDate : `${dueDate}T12:00:00`,
+  );
   if (Number.isNaN(date.getTime())) return dueDate;
   return new Intl.DateTimeFormat(undefined, {
     month: "short",
@@ -76,6 +95,91 @@ function proofExpiresAt(iso) {
   const ms = Date.parse(iso);
   const base = Number.isNaN(ms) ? Date.now() : ms;
   return new Date(base + PROOF_TTL_DAYS * 86400000).toISOString();
+}
+
+function isAdminRole(role) {
+  return role === "parent";
+}
+
+function currentPerson() {
+  const id = meSelect.value;
+  if (!id) return null;
+  return people.find((p) => p.id === id) ?? null;
+}
+
+function isAdmin() {
+  return isAdminRole(currentPerson()?.role);
+}
+
+function resolveRecurrence(kind, interval, unit) {
+  if (kind === "once") return {};
+  if (kind === "daily") {
+    return { recurrenceInterval: 1, recurrenceUnit: "day", cooldownDays: 1 };
+  }
+  const resolvedUnit = unit || DEFAULT_PERIODIC_UNIT;
+  const resolvedInterval =
+    interval !== undefined && Number(interval) > 0
+      ? Math.floor(Number(interval))
+      : DEFAULT_PERIODIC_INTERVAL;
+  return {
+    recurrenceInterval: resolvedInterval,
+    recurrenceUnit: resolvedUnit,
+    cooldownDays: resolvedInterval * (resolvedUnit === "week" ? 7 : 1),
+  };
+}
+
+function formatRecurrenceLabel(kind, interval, unit) {
+  if (kind === "once") return null;
+  if (kind === "daily") return "Daily";
+  const resolved = resolveRecurrence(kind, interval, unit);
+  const n = resolved.recurrenceInterval ?? DEFAULT_PERIODIC_INTERVAL;
+  const u = resolved.recurrenceUnit ?? DEFAULT_PERIODIC_UNIT;
+  if (u === "week") return n === 1 ? "Every week" : `Every ${n} weeks`;
+  return n === 1 ? "Every day" : `Every ${n} days`;
+}
+
+function nextDueAt(completedAtIso, kind, interval, unit) {
+  if (kind === "once") return undefined;
+  const ms = Date.parse(completedAtIso);
+  const base = Number.isNaN(ms) ? Date.now() : ms;
+  if (kind === "daily") {
+    const d = new Date(base);
+    d.setUTCDate(d.getUTCDate() + 1);
+    d.setUTCHours(0, 0, 0, 0);
+    return d.toISOString();
+  }
+  const { cooldownDays } = resolveRecurrence(kind, interval, unit);
+  return new Date(base + (cooldownDays ?? 28) * 86400000).toISOString();
+}
+
+function computeScoreboard(peopleList, completionList) {
+  const totals = new Map();
+  for (const event of completionList) {
+    const status = event.assessmentStatus ?? event.assessment_status;
+    const personId = event.personId ?? event.person_id;
+    if (status !== "approved" || !personId) continue;
+    const add = Number(event.pointsAwarded ?? event.points_awarded ?? 0);
+    totals.set(personId, (totals.get(personId) ?? 0) + add);
+  }
+  return peopleList
+    .map((person) => ({
+      personId: person.id,
+      displayName: person.displayName,
+      role: person.role,
+      points: totals.get(person.id) ?? 0,
+    }))
+    .sort(
+      (a, b) =>
+        b.points - a.points || a.displayName.localeCompare(b.displayName),
+    );
+}
+
+function syncComposerAdminUi() {
+  const admin = isAdmin();
+  pointsFields.classList.toggle("hidden", !admin);
+  adminHint.classList.toggle("hidden", !admin);
+  const periodic = kindInput.value === "periodic";
+  recurrenceFields.classList.toggle("hidden", !periodic);
 }
 
 function supabaseConfigured() {
@@ -156,60 +260,137 @@ function rowToLegacyChore(row) {
   };
 }
 
+function latestCompletionForInstance(instanceId) {
+  const matches = completions.filter(
+    (c) => (c.instanceId ?? c.instance_id) === instanceId,
+  );
+  if (matches.length === 0) return null;
+  matches.sort((a, b) => {
+    const ta = Date.parse(a.completedAt ?? a.completed_at ?? "") || 0;
+    const tb = Date.parse(b.completedAt ?? b.completed_at ?? "") || 0;
+    return tb - ta;
+  });
+  return matches[0];
+}
+
 function instanceToView(row, template) {
   const status = row.status;
   const openLike =
     status === "noticed" || status === "open" || status === "assigned";
   const steps = Array.isArray(template?.steps) ? template.steps : [];
+  const kind = template?.kind || "once";
+  const interval = template?.recurrence_interval ?? template?.recurrenceInterval;
+  const unit = template?.recurrence_unit ?? template?.recurrenceUnit;
+  const points = Number(
+    template?.points ?? DEFAULT_TASK_POINTS,
+  );
+  const completion = latestCompletionForInstance(row.id);
+  const assessmentStatus =
+    completion?.assessmentStatus ?? completion?.assessment_status ?? null;
   return {
     id: row.id,
     title: row.title,
     ...(row.description ? { description: row.description } : {}),
     ...(row.assignee ? { assignee: row.assignee } : {}),
-    status: openLike ? "open" : "done",
+    status: openLike ? "open" : status === "waiting" ? "waiting" : "done",
     instanceStatus: status,
     ...(row.due_date ? { dueDate: row.due_date } : {}),
+    ...(row.due_at ? { dueAt: row.due_at } : {}),
     createdAt: row.created_at,
     ...(row.completed_at ? { completedAt: row.completed_at } : {}),
     templateId: row.template_id ?? undefined,
     assigneePersonId: row.assignee_person_id ?? undefined,
     steps,
     referencePhotoPath: template?.reference_photo_path || undefined,
-    kind: template?.kind || "once",
+    kind,
+    recurrenceInterval: interval,
+    recurrenceUnit: unit,
+    points,
+    completionId: completion?.id,
+    assessmentStatus,
     mode: "instance",
   };
 }
 
 async function listLegacySupabase(status) {
   let path = "chores?select=*&order=created_at.desc";
-  if (status !== "all") {
+  if (status !== "all" && status !== "scores") {
     path += `&status=eq.${encodeURIComponent(status)}`;
   }
   const rows = await supabaseRequest(path);
   return (rows ?? []).map(rowToLegacyChore);
 }
 
+async function promoteDueWaitingRich(instanceRows) {
+  const now = Date.now();
+  const due = (instanceRows ?? []).filter((row) => {
+    if (row.status !== "waiting" || !row.due_at) return false;
+    const ms = Date.parse(row.due_at);
+    return !Number.isNaN(ms) && ms <= now;
+  });
+  await Promise.all(
+    due.map((row) =>
+      supabaseRequest(`task_instances?id=eq.${encodeURIComponent(row.id)}`, {
+        method: "PATCH",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({
+          status: "open",
+          opened_at: new Date().toISOString(),
+          assignee_person_id: null,
+          assignee: null,
+          assigned_at: null,
+        }),
+      }).catch(() => null),
+    ),
+  );
+  return due.length > 0;
+}
+
 async function listRichSupabase(status) {
-  const [instanceRows, templateRows, peopleRows] = await Promise.all([
-    supabaseRequest("task_instances?select=*&order=created_at.desc"),
-    supabaseRequest("task_templates?select=*&order=created_at.desc"),
-    supabaseRequest("people?select=*&order=display_name.asc"),
-  ]);
+  const [instanceRows, templateRows, peopleRows, completionRows] =
+    await Promise.all([
+      supabaseRequest("task_instances?select=*&order=created_at.desc"),
+      supabaseRequest("task_templates?select=*&order=created_at.desc"),
+      supabaseRequest("people?select=*&order=display_name.asc"),
+      supabaseRequest("completion_events?select=*&order=completed_at.desc"),
+    ]);
   people = (peopleRows ?? []).map((row) => ({
     id: row.id,
     displayName: row.display_name,
     role: row.role,
   }));
   templatesById = new Map((templateRows ?? []).map((row) => [row.id, row]));
+  completions = completionRows ?? [];
+  scoreRows = computeScoreboard(people, completions);
+
+  if (await promoteDueWaitingRich(instanceRows)) {
+    const refreshed = await supabaseRequest(
+      "task_instances?select=*&order=created_at.desc",
+    );
+    return finalizeRichViews(refreshed, status);
+  }
+  return finalizeRichViews(instanceRows, status);
+}
+
+function finalizeRichViews(instanceRows, status) {
   const views = (instanceRows ?? []).map((row) =>
     instanceToView(row, row.template_id ? templatesById.get(row.template_id) : null),
   );
-  if (status === "all") return views;
-  if (status === "done") return views.filter((c) => c.status === "done");
-  return views.filter((c) => c.status === "open");
+  if (status === "scores" || status === "all") return views;
+  if (status === "done") {
+    return views.filter(
+      (c) => c.status === "done" || c.instanceStatus === "done",
+    );
+  }
+  return views.filter(
+    (c) =>
+      c.instanceStatus === "noticed" ||
+      c.instanceStatus === "open" ||
+      c.instanceStatus === "assigned",
+  );
 }
 
-async function findOrCreatePerson(name) {
+async function findOrCreatePerson(name, role = "child") {
   const trimmed = name.trim();
   if (!trimmed) return null;
   const existing = people.find(
@@ -224,7 +405,7 @@ async function findOrCreatePerson(name) {
       body: JSON.stringify({
         id,
         display_name: trimmed,
-        role: "child",
+        role: role || "child",
         active: true,
         created_at: new Date().toISOString(),
       }),
@@ -239,7 +420,11 @@ async function findOrCreatePerson(name) {
     );
     return person;
   }
-  const person = { id: newId("person"), displayName: trimmed, role: "child" };
+  const person = {
+    id: newId("person"),
+    displayName: trimmed,
+    role: role || "child",
+  };
   people = [...people, person];
   return person;
 }
@@ -253,6 +438,16 @@ async function addRichSupabase(input) {
   if (input.referenceFile) {
     referencePath = await uploadPhoto(input.referenceFile, "reference");
   }
+  const kind = input.kind || "once";
+  const recurrence = resolveRecurrence(
+    kind,
+    input.recurrenceInterval,
+    input.recurrenceUnit,
+  );
+  const points =
+    isAdmin() && input.points !== undefined
+      ? Math.max(0, Math.floor(Number(input.points)))
+      : DEFAULT_TASK_POINTS;
   const templateId = newId("tmpl");
   const instanceId = newId("inst");
   await supabaseRequest("task_templates", {
@@ -261,7 +456,11 @@ async function addRichSupabase(input) {
     body: JSON.stringify({
       id: templateId,
       title: input.title.trim(),
-      kind: input.kind || "once",
+      kind,
+      cooldown_days: recurrence.cooldownDays ?? null,
+      recurrence_interval: recurrence.recurrenceInterval ?? null,
+      recurrence_unit: recurrence.recurrenceUnit ?? null,
+      points,
       estimated_minutes: 10,
       effort_weight: 1,
       steps: input.steps ?? [],
@@ -290,7 +489,6 @@ async function addRichSupabase(input) {
       created_at: now,
     }),
   });
-  // Mirror into legacy chores for older clients / fallback readers.
   try {
     await supabaseRequest("chores", {
       method: "POST",
@@ -308,11 +506,16 @@ async function addRichSupabase(input) {
   } catch {
     /* legacy mirror optional */
   }
-  return instanceToView(rows[0], {
+  templatesById.set(templateId, {
+    id: templateId,
+    kind,
     steps: input.steps ?? [],
     reference_photo_path: referencePath,
-    kind: input.kind || "once",
+    recurrence_interval: recurrence.recurrenceInterval,
+    recurrence_unit: recurrence.recurrenceUnit,
+    points,
   });
+  return instanceToView(rows[0], templatesById.get(templateId));
 }
 
 async function addLegacySupabase(input) {
@@ -374,6 +577,39 @@ async function selfAssignRich(chore) {
   return instanceToView(rows[0], templatesById.get(rows[0].template_id));
 }
 
+async function scheduleNextRich(chore, completedAt) {
+  const template = chore.templateId
+    ? templatesById.get(chore.templateId)
+    : null;
+  if (!template || template.kind === "once" || template.active === false) {
+    return;
+  }
+  const dueAt = nextDueAt(
+    completedAt,
+    template.kind,
+    template.recurrence_interval ?? template.recurrenceInterval,
+    template.recurrence_unit ?? template.recurrenceUnit,
+  );
+  const now = new Date().toISOString();
+  await supabaseRequest("task_instances", {
+    method: "POST",
+    headers: { Prefer: "return=minimal" },
+    body: JSON.stringify({
+      id: newId("inst"),
+      template_id: template.id,
+      title: template.title || chore.title,
+      estimated_minutes: template.estimated_minutes ?? 10,
+      status: "waiting",
+      assignee_person_id: null,
+      assignee: null,
+      opened_at: now,
+      due_at: dueAt ?? null,
+      source: "schedule",
+      created_at: now,
+    }),
+  });
+}
+
 async function completeRich(chore, proofFile) {
   const now = new Date().toISOString();
   let proofPath = null;
@@ -404,10 +640,11 @@ async function completeRich(chore, proofFile) {
       completed_at: now,
       proof_photo_path: proofPath,
       proof_expires_at: proofPath ? proofExpiresAt(now) : null,
+      assessment_status: "pending",
+      points_awarded: null,
       created_at: now,
     }),
   });
-  // Expire prior proofs for same template (next-cycle rule).
   if (chore.templateId) {
     try {
       await supabaseRequest(
@@ -423,6 +660,11 @@ async function completeRich(chore, proofFile) {
     }
   }
   try {
+    await scheduleNextRich(chore, now);
+  } catch (error) {
+    console.warn("Re-raise schedule failed", error);
+  }
+  try {
     await supabaseRequest(`chores?id=eq.${encodeURIComponent(chore.id)}`, {
       method: "PATCH",
       headers: { Prefer: "return=minimal" },
@@ -431,6 +673,37 @@ async function completeRich(chore, proofFile) {
   } catch {
     /* optional */
   }
+}
+
+async function assessRich(chore, decision) {
+  if (!isAdmin()) {
+    throw new Error("Pick “I am” a parent to assess completions.");
+  }
+  if (!chore.completionId) {
+    throw new Error("No completion to assess for this task.");
+  }
+  const assessor = currentPerson();
+  const template = chore.templateId
+    ? templatesById.get(chore.templateId)
+    : null;
+  const award =
+    decision === "approved"
+      ? Number(template?.points ?? chore.points ?? DEFAULT_TASK_POINTS)
+      : 0;
+  const now = new Date().toISOString();
+  await supabaseRequest(
+    `completion_events?id=eq.${encodeURIComponent(chore.completionId)}`,
+    {
+      method: "PATCH",
+      headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({
+        assessment_status: decision,
+        points_awarded: award,
+        assessed_by_person_id: assessor.id,
+        assessed_at: now,
+      }),
+    },
+  );
 }
 
 async function reopenRich(chore) {
@@ -495,7 +768,6 @@ function loadLocalV2() {
   } catch {
     /* fall through */
   }
-  // Migrate v1 chores → instances
   try {
     const raw = localStorage.getItem(STORAGE_KEY_V1);
     if (!raw) {
@@ -525,8 +797,32 @@ function saveLocalV2(store) {
   localStorage.setItem(STORAGE_KEY_V2, JSON.stringify(store));
 }
 
+function promoteLocalWaiting(store) {
+  const now = Date.now();
+  let changed = false;
+  const instances = store.instances.map((row) => {
+    const status = row.status;
+    const dueAt = row.dueAt ?? row.due_at;
+    if (status !== "waiting" || !dueAt) return row;
+    const ms = Date.parse(dueAt);
+    if (Number.isNaN(ms) || ms > now) return row;
+    changed = true;
+    const next = { ...row, status: "open", openedAt: new Date().toISOString() };
+    delete next.assigneePersonId;
+    delete next.assignee_person_id;
+    delete next.assignee;
+    delete next.assignedAt;
+    delete next.assigned_at;
+    return next;
+  });
+  if (!changed) return store;
+  const nextStore = { ...store, instances };
+  saveLocalV2(nextStore);
+  return nextStore;
+}
+
 function listLocal(status) {
-  const store = loadLocalV2();
+  let store = promoteLocalWaiting(loadLocalV2());
   people = store.people.map((p) => ({
     id: p.id,
     displayName: p.displayName ?? p.display_name,
@@ -540,9 +836,14 @@ function listLocal(status) {
         steps: t.steps ?? [],
         reference_photo_path: t.referencePhotoPath ?? t.reference_photo_path,
         kind: t.kind ?? "once",
+        recurrence_interval: t.recurrenceInterval ?? t.recurrence_interval,
+        recurrence_unit: t.recurrenceUnit ?? t.recurrence_unit,
+        points: t.points ?? DEFAULT_TASK_POINTS,
       },
     ]),
   );
+  completions = store.completions;
+  scoreRows = computeScoreboard(people, completions);
   const views = store.instances.map((row) => {
     const normalized = {
       id: row.id,
@@ -552,6 +853,7 @@ function listLocal(status) {
       assignee: row.assignee,
       assignee_person_id: row.assigneePersonId ?? row.assignee_person_id,
       due_date: row.dueDate ?? row.due_date,
+      due_at: row.dueAt ?? row.due_at,
       created_at: row.createdAt ?? row.created_at,
       completed_at: row.completedAt ?? row.completed_at,
       template_id: row.templateId ?? row.template_id,
@@ -561,9 +863,16 @@ function listLocal(status) {
       normalized.template_id ? templatesById.get(normalized.template_id) : null,
     );
   });
-  if (status === "all") return views;
-  if (status === "done") return views.filter((c) => c.status === "done");
-  return views.filter((c) => c.status === "open");
+  if (status === "scores" || status === "all") return views;
+  if (status === "done") {
+    return views.filter((c) => c.instanceStatus === "done");
+  }
+  return views.filter(
+    (c) =>
+      c.instanceStatus === "noticed" ||
+      c.instanceStatus === "open" ||
+      c.instanceStatus === "assigned",
+  );
 }
 
 async function api(path, options = {}) {
@@ -597,25 +906,15 @@ async function detectBackend() {
     } catch (error) {
       const message = String(error?.message || error);
       if (/PGRST205|Could not find the table/i.test(message)) {
-        setStatus(
-          "Supabase is linked, but tables are missing — run supabase/schema.sql in the School Compass project.",
-        );
+        console.warn("Legacy chores missing", error);
+      } else {
+        console.warn("Supabase legacy unavailable", error);
       }
-      console.warn("Supabase unavailable, falling back", error);
     }
   }
   try {
-    const url = new URL("api/chores?status=open", BASE);
-    const response = await fetch(url, {
-      headers: { accept: "application/json" },
-      cache: "no-store",
-    });
-    if (response.ok) {
-      const data = await response.json();
-      if (typeof data?.count === "number" && Array.isArray(data.chores)) {
-        return "api";
-      }
-    }
+    await api("api/chores?status=open");
+    return "api";
   } catch {
     /* static host */
   }
@@ -628,48 +927,108 @@ function fillMeSelect() {
   for (const person of people) {
     const opt = document.createElement("option");
     opt.value = person.id;
-    opt.textContent = person.displayName;
+    const admin = isAdminRole(person.role) ? " · parent" : "";
+    opt.textContent = `${person.displayName}${admin}`;
     meSelect.append(opt);
   }
   if (previous && people.some((p) => p.id === previous)) {
     meSelect.value = previous;
   }
+  syncComposerAdminUi();
+}
+
+function renderScoreboard() {
+  listEl.innerHTML = "";
+  listEl.classList.add("hidden");
+  scoreboardEl.classList.remove("hidden");
+  emptyEl.classList.add("hidden");
+  scoreboardEl.innerHTML = "";
+  fillMeSelect();
+  summaryEl.textContent =
+    scoreRows.length === 0
+      ? "Add household people to start the scoreboard."
+      : "Points from parent-approved completions.";
+
+  if (scoreRows.length === 0) {
+    emptyEl.textContent = "No people yet. Add a parent or child below.";
+    emptyEl.classList.remove("hidden");
+    return;
+  }
+
+  for (const row of scoreRows) {
+    const item = document.createElement("div");
+    item.className = "score-row";
+    const left = document.createElement("div");
+    const name = document.createElement("p");
+    name.className = "score-name";
+    name.textContent = row.displayName;
+    const role = document.createElement("p");
+    role.className = "score-role";
+    role.textContent =
+      row.role === "parent"
+        ? "Parent (admin)"
+        : row.role === "other"
+          ? "Other"
+          : "Child";
+    left.append(name, role);
+    const pts = document.createElement("div");
+    pts.className = "score-points";
+    pts.textContent = String(row.points);
+    pts.setAttribute("aria-label", `${row.points} points`);
+    item.append(left, pts);
+    scoreboardEl.append(item);
+  }
 }
 
 function render() {
+  if (filter === "scores") {
+    renderScoreboard();
+    return;
+  }
+
+  scoreboardEl.classList.add("hidden");
+  scoreboardEl.innerHTML = "";
+  listEl.classList.remove("hidden");
   listEl.innerHTML = "";
   emptyEl.classList.toggle("hidden", chores.length > 0);
+  emptyEl.textContent =
+    "Nothing here yet. Add the next household task below.";
   fillMeSelect();
 
-  const openCount = chores.filter((chore) => chore.status === "open").length;
+  const openCount = chores.filter(
+    (chore) =>
+      chore.instanceStatus === "open" ||
+      chore.instanceStatus === "assigned" ||
+      chore.instanceStatus === "noticed" ||
+      (chore.status === "open" && !chore.instanceStatus),
+  ).length;
   if (filter === "open") {
     summaryEl.textContent =
       openCount === 0
         ? "All clear for now."
         : `${openCount} open ${openCount === 1 ? "task" : "tasks"} for the household.`;
   } else if (filter === "done") {
-    summaryEl.textContent = "Recently finished work.";
+    summaryEl.textContent = "Recently finished work — parents assess for points.";
   } else {
     summaryEl.textContent = "Everything on the household board.";
   }
 
   for (const chore of chores) {
+    if (chore.instanceStatus === "waiting" && filter !== "all") continue;
+
     const li = document.createElement("li");
-    li.className = `chore${chore.status === "done" ? " is-done" : ""}`;
+    const done =
+      chore.status === "done" || chore.instanceStatus === "done";
+    li.className = `chore${done ? " is-done" : ""}`;
     li.dataset.id = chore.id;
 
     const button = document.createElement("button");
     button.type = "button";
     button.className = "check";
-    button.setAttribute(
-      "aria-pressed",
-      chore.status === "done" ? "true" : "false",
-    );
+    button.setAttribute("aria-pressed", done ? "true" : "false");
     button.setAttribute(
       "aria-label",
-      chore.status === "done"
-        ? `Mark ${chore.title} as open`
-        : `Mark ${chore.title} as done`,
+      done ? `Mark ${chore.title} as open` : `Mark ${chore.title} as done`,
     );
     button.innerHTML = checkIcon;
     button.addEventListener("click", () => {
@@ -690,14 +1049,48 @@ function render() {
       assignee.textContent = chore.assignee;
       meta.append(assignee);
     }
-    if (chore.kind && chore.kind !== "once") {
+    const recur = formatRecurrenceLabel(
+      chore.kind,
+      chore.recurrenceInterval,
+      chore.recurrenceUnit,
+    );
+    if (recur) {
       const kind = document.createElement("span");
       kind.className = "meta-pill";
-      kind.textContent = chore.kind === "daily" ? "Daily" : "Repeats";
+      kind.textContent = recur;
       meta.append(kind);
     }
-    const dueLabel = formatDue(chore.dueDate);
-    if (dueLabel) {
+    if (chore.points !== undefined && chore.mode === "instance") {
+      const pts = document.createElement("span");
+      pts.className = "meta-pill";
+      pts.textContent = `${chore.points} pt${chore.points === 1 ? "" : "s"}`;
+      meta.append(pts);
+    }
+    if (chore.instanceStatus === "waiting") {
+      const waiting = document.createElement("span");
+      waiting.className = "meta-pill";
+      const when = formatDue(chore.dueAt);
+      waiting.textContent = when ? `Resting until ${when}` : "Resting";
+      meta.append(waiting);
+    }
+    if (done && chore.assessmentStatus === "pending") {
+      const pending = document.createElement("span");
+      pending.className = "meta-pill is-pending";
+      pending.textContent = "Pending assessment";
+      meta.append(pending);
+    } else if (done && chore.assessmentStatus === "approved") {
+      const ok = document.createElement("span");
+      ok.className = "meta-pill is-approved";
+      ok.textContent = "Approved";
+      meta.append(ok);
+    } else if (done && chore.assessmentStatus === "rejected") {
+      const no = document.createElement("span");
+      no.className = "meta-pill is-pending";
+      no.textContent = "Not approved";
+      meta.append(no);
+    }
+    const dueLabel = formatDue(chore.dueDate || chore.dueAt);
+    if (dueLabel && chore.instanceStatus !== "waiting") {
       const due = document.createElement("span");
       due.className = "meta-pill";
       due.textContent = `Due ${dueLabel}`;
@@ -724,7 +1117,8 @@ function render() {
       const figure = document.createElement("figure");
       figure.className = "chore-ref";
       const img = document.createElement("img");
-      img.src = storagePublicUrl(chore.referencePhotoPath) || chore.referencePhotoPath;
+      img.src =
+        storagePublicUrl(chore.referencePhotoPath) || chore.referencePhotoPath;
       img.alt = "What good looks like";
       img.loading = "lazy";
       const caption = document.createElement("figcaption");
@@ -733,7 +1127,7 @@ function render() {
       body.append(figure);
     }
 
-    if (chore.status === "open" && backend !== "api") {
+    if (!done && chore.instanceStatus !== "waiting" && backend !== "api") {
       const actions = document.createElement("div");
       actions.className = "chore-actions";
       const claim = document.createElement("button");
@@ -747,6 +1141,33 @@ function render() {
       body.append(actions);
     }
 
+    if (
+      done &&
+      chore.assessmentStatus === "pending" &&
+      chore.completionId &&
+      isAdmin() &&
+      (backend === "supabase-rich" || backend === "local")
+    ) {
+      const assess = document.createElement("div");
+      assess.className = "assess-actions";
+      const approve = document.createElement("button");
+      approve.type = "button";
+      approve.className = "text-btn";
+      approve.textContent = `Approve (+${chore.points ?? DEFAULT_TASK_POINTS} pts)`;
+      approve.addEventListener("click", () => {
+        void assessChore(chore, "approved");
+      });
+      const reject = document.createElement("button");
+      reject.type = "button";
+      reject.className = "text-btn is-reject";
+      reject.textContent = "Reject";
+      reject.addEventListener("click", () => {
+        void assessChore(chore, "rejected");
+      });
+      assess.append(approve, reject);
+      body.append(assess);
+    }
+
     li.append(button, body);
     listEl.append(li);
   }
@@ -757,9 +1178,11 @@ async function loadChores({ quiet = false } = {}) {
     chores = await listRichSupabase(filter);
   } else if (backend === "supabase") {
     chores = await listLegacySupabase(filter);
+    scoreRows = [];
   } else if (backend === "api") {
-    const data = await api(`api/chores?status=${encodeURIComponent(filter)}`);
+    const data = await api(`api/chores?status=${encodeURIComponent(filter === "scores" ? "all" : filter)}`);
     chores = (data.chores ?? []).map((c) => ({ ...c, mode: "legacy" }));
+    scoreRows = [];
   } else {
     chores = listLocal(filter);
   }
@@ -767,7 +1190,7 @@ async function loadChores({ quiet = false } = {}) {
   if (!quiet && (backend === "supabase" || backend === "supabase-rich")) {
     setStatus(
       backend === "supabase-rich"
-        ? "Synced (templates + self-assign)."
+        ? "Synced (points + recurrence + assessment)."
         : "Synced with Supabase.",
     );
   }
@@ -787,6 +1210,7 @@ async function ensureMePerson() {
     fillMeSelect();
     meSelect.value = person.id;
     localStorage.setItem(ME_KEY, person.id);
+    syncComposerAdminUi();
     return person;
   }
 
@@ -816,6 +1240,7 @@ async function ensureMePerson() {
     fillMeSelect();
     meSelect.value = person.id;
     localStorage.setItem(ME_KEY, person.id);
+    syncComposerAdminUi();
     return {
       id: person.id,
       displayName: person.displayName ?? person.display_name,
@@ -823,13 +1248,65 @@ async function ensureMePerson() {
     };
   }
 
-  // Legacy supabase / api: ephemeral name only
   const person = { id: newId("person"), displayName: name, role: "child" };
   people = [...people.filter((p) => p.displayName !== name), person];
   fillMeSelect();
   meSelect.value = person.id;
   localStorage.setItem(ME_KEY, person.id);
+  syncComposerAdminUi();
   return person;
+}
+
+async function addHouseholdPerson() {
+  const name = personNameInput.value.trim();
+  if (!name) {
+    setStatus("Enter a name to add a household person.");
+    return;
+  }
+  const role = personRoleInput.value || "child";
+  try {
+    if (backend === "supabase-rich") {
+      await findOrCreatePerson(name, role);
+    } else if (backend === "local") {
+      const store = loadLocalV2();
+      const existing = store.people.find(
+        (p) =>
+          (p.displayName || p.display_name || "").toLowerCase() ===
+          name.toLowerCase(),
+      );
+      if (existing) {
+        existing.role = role;
+      } else {
+        store.people.push({
+          id: newId("person"),
+          displayName: name,
+          role,
+          active: true,
+          createdAt: new Date().toISOString(),
+        });
+      }
+      saveLocalV2(store);
+      people = store.people.map((p) => ({
+        id: p.id,
+        displayName: p.displayName ?? p.display_name,
+        role: p.role ?? "child",
+      }));
+      scoreRows = computeScoreboard(people, store.completions);
+    } else {
+      setStatus("Adding people needs rich Supabase schema or local mode.");
+      return;
+    }
+    personNameInput.value = "";
+    fillMeSelect();
+    setStatus(
+      role === "parent"
+        ? `Added ${name} as parent (admin). Select them under “I am”.`
+        : `Added ${name}.`,
+    );
+    if (filter === "scores") render();
+  } catch (error) {
+    setStatus(error.message);
+  }
 }
 
 async function claimChore(chore) {
@@ -867,9 +1344,54 @@ async function claimChore(chore) {
   }
 }
 
+async function assessChore(chore, decision) {
+  try {
+    if (!isAdmin()) {
+      throw new Error("Pick “I am” a parent to assess completions.");
+    }
+    if (backend === "supabase-rich") {
+      await assessRich(chore, decision);
+    } else if (backend === "local") {
+      const store = loadLocalV2();
+      const assessor = currentPerson();
+      const index = store.completions.findIndex((c) => c.id === chore.completionId);
+      if (index < 0) throw new Error("No completion to assess.");
+      const template = store.templates.find(
+        (t) => t.id === (chore.templateId || store.completions[index].templateId),
+      );
+      const award =
+        decision === "approved"
+          ? Number(template?.points ?? chore.points ?? DEFAULT_TASK_POINTS)
+          : 0;
+      store.completions[index] = {
+        ...store.completions[index],
+        assessmentStatus: decision,
+        pointsAwarded: award,
+        assessedByPersonId: assessor.id,
+        assessedAt: new Date().toISOString(),
+      };
+      saveLocalV2(store);
+    } else {
+      throw new Error("Assessment needs rich schema or local mode.");
+    }
+    setStatus(
+      decision === "approved"
+        ? "Approved — points added to the scoreboard."
+        : "Rejected — no points awarded.",
+    );
+    await loadChores({ quiet: true });
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
 function onCheckClick(chore) {
-  if (chore.status === "done") {
+  if (chore.status === "done" || chore.instanceStatus === "done") {
     void reopenChore(chore);
+    return;
+  }
+  if (chore.instanceStatus === "waiting") {
+    setStatus("This task is resting until its next due date.");
     return;
   }
   pendingComplete = chore;
@@ -926,8 +1448,9 @@ async function finishComplete(chore, proofFile) {
       const index = store.instances.findIndex((i) => i.id === chore.id);
       if (index < 0) throw new Error("Task not found");
       const now = new Date().toISOString();
+      const current = store.instances[index];
       store.instances[index] = {
-        ...store.instances[index],
+        ...current,
         status: "done",
         completedAt: now,
       };
@@ -943,14 +1466,35 @@ async function finishComplete(chore, proofFile) {
         completedAt: now,
         proofPhotoPath: proofPath || undefined,
         proofExpiresAt: proofPath ? proofExpiresAt(now) : undefined,
+        assessmentStatus: "pending",
         createdAt: now,
       });
+      const template = store.templates.find((t) => t.id === chore.templateId);
+      if (template && template.kind !== "once") {
+        const dueAt = nextDueAt(
+          now,
+          template.kind,
+          template.recurrenceInterval ?? template.recurrence_interval,
+          template.recurrenceUnit ?? template.recurrence_unit,
+        );
+        store.instances.push({
+          id: newId("inst"),
+          templateId: template.id,
+          title: template.title,
+          status: "waiting",
+          dueAt,
+          openedAt: now,
+          createdAt: now,
+          source: "schedule",
+          estimatedMinutes: template.estimatedMinutes ?? 10,
+        });
+      }
       saveLocalV2(store);
     }
     setStatus(
       proofFile
-        ? `Marked done (proof kept ~${PROOF_TTL_DAYS} days).`
-        : "Marked done.",
+        ? `Marked done (proof kept ~${PROOF_TTL_DAYS} days). Pending parent assessment.`
+        : "Marked done. Pending parent assessment.",
     );
     await loadChores({ quiet: true });
   } catch (error) {
@@ -1000,6 +1544,16 @@ function startPolling() {
 
 meSelect.addEventListener("change", () => {
   localStorage.setItem(ME_KEY, meSelect.value);
+  syncComposerAdminUi();
+  render();
+});
+
+kindInput.addEventListener("change", () => {
+  syncComposerAdminUi();
+});
+
+addPersonBtn.addEventListener("click", () => {
+  void addHouseholdPerson();
 });
 
 filterButtons.forEach((button) => {
@@ -1023,11 +1577,22 @@ form.addEventListener("submit", async (event) => {
   submit.disabled = true;
   setStatus("Saving…");
   try {
+    const kind = kindInput.value || "once";
+    const recurrence = resolveRecurrence(
+      kind,
+      Number(recurrenceIntervalInput.value) || DEFAULT_PERIODIC_INTERVAL,
+      recurrenceUnitInput.value || DEFAULT_PERIODIC_UNIT,
+    );
     const payload = {
       title,
       assignee: assigneeInput.value.trim() || undefined,
       dueDate: dueDateInput.value || undefined,
-      kind: kindInput.value || "once",
+      kind,
+      recurrenceInterval: recurrence.recurrenceInterval,
+      recurrenceUnit: recurrence.recurrenceUnit,
+      points: isAdmin()
+        ? Math.max(0, Math.floor(Number(pointsInput.value) || DEFAULT_TASK_POINTS))
+        : DEFAULT_TASK_POINTS,
       steps: parseSteps(stepsInput.value),
       referenceFile: referencePhotoInput.files?.[0] ?? null,
     };
@@ -1075,6 +1640,10 @@ form.addEventListener("submit", async (event) => {
         id: templateId,
         title: payload.title,
         kind: payload.kind,
+        recurrenceInterval: payload.recurrenceInterval,
+        recurrenceUnit: payload.recurrenceUnit,
+        cooldownDays: recurrence.cooldownDays,
+        points: payload.points,
         steps: payload.steps,
         referencePhotoPath: referencePath,
         estimatedMinutes: 10,
@@ -1098,8 +1667,12 @@ form.addEventListener("submit", async (event) => {
     }
     form.reset();
     kindInput.value = "once";
+    recurrenceIntervalInput.value = String(DEFAULT_PERIODIC_INTERVAL);
+    recurrenceUnitInput.value = DEFAULT_PERIODIC_UNIT;
+    pointsInput.value = String(DEFAULT_TASK_POINTS);
+    syncComposerAdminUi();
     titleInput.focus();
-    if (filter === "done") {
+    if (filter === "done" || filter === "scores") {
       filter = "open";
       filterButtons.forEach((item) => {
         const active = item.dataset.filter === "open";
@@ -1139,13 +1712,15 @@ if ("serviceWorker" in navigator) {
   });
 }
 
+syncComposerAdminUi();
+
 void (async () => {
   backend = await detectBackend();
   if (backend === "supabase-rich") {
     setStatus("Connected (rich model). Polling…");
     startPolling();
   } else if (backend === "supabase") {
-    setStatus("Connected to Supabase (legacy table). Run schema.sql for steps/photos.");
+    setStatus("Connected to Supabase (legacy table). Run schema.sql for points/recurrence.");
     startPolling();
   } else if (backend === "local") {
     setStatus("Saved on this device (no Supabase / API).");

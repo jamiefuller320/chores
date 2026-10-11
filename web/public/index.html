@@ -34,6 +34,12 @@
           <p class="brand">Chores</p>
           <p class="tagline" id="summary">Loading your household list…</p>
         </div>
+        <div class="identity" aria-label="Who is using this device">
+          <label class="identity-label" for="me-person">I am</label>
+          <select id="me-person" aria-label="Select who you are">
+            <option value="">Someone…</option>
+          </select>
+        </div>
         <div class="filters" role="tablist" aria-label="Chore filters">
           <button class="filter is-active" data-filter="open" role="tab" aria-selected="true">
             Open
@@ -76,10 +82,15 @@
             id="assignee"
             name="assignee"
             type="text"
-            placeholder="Who?"
+            placeholder="Assign to… (optional)"
             maxlength="40"
             aria-label="Assignee"
           />
+          <select id="kind" name="kind" aria-label="Repeat kind">
+            <option value="once">Once</option>
+            <option value="daily">Daily</option>
+            <option value="periodic">Every N days</option>
+          </select>
           <input
             id="dueDate"
             name="dueDate"
@@ -87,9 +98,51 @@
             aria-label="Due date"
           />
         </div>
+        <details class="composer-more">
+          <summary>Steps &amp; standard photo</summary>
+          <label class="field-label" for="steps">Steps (one per line)</label>
+          <textarea
+            id="steps"
+            name="steps"
+            rows="3"
+            maxlength="2000"
+            placeholder="Clear surface&#10;Wipe with cloth&#10;Put items back"
+          ></textarea>
+          <label class="field-label" for="referencePhoto">What good looks like</label>
+          <input
+            id="referencePhoto"
+            name="referencePhoto"
+            type="file"
+            accept="image/*"
+            capture="environment"
+            aria-label="Reference photo"
+          />
+        </details>
         <p id="form-status" class="form-status" role="status" aria-live="polite"></p>
       </form>
     </div>
+
+    <dialog id="complete-dialog" class="sheet">
+      <form method="dialog" id="complete-form" class="sheet-body">
+        <h2 class="sheet-title">Mark done?</h2>
+        <p id="complete-title" class="sheet-subtitle"></p>
+        <label class="field-label" for="proofPhoto">Proof photo (optional, kept ~7 days)</label>
+        <input
+          id="proofPhoto"
+          name="proofPhoto"
+          type="file"
+          accept="image/*"
+          capture="environment"
+        />
+        <div class="sheet-actions">
+          <button type="submit" value="cancel" class="ghost">Cancel</button>
+          <button type="submit" value="confirm" class="primary" id="complete-confirm">
+            Done
+          </button>
+        </div>
+      </form>
+    </dialog>
+
     <script src="./config.js"></script>
     <script src="./app.js" type="module"></script>
   </body>

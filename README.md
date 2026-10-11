@@ -2,60 +2,51 @@
 
 Household chore tracking with a **web-first UI for iPhone and iPad**.
 
-Always-on hosting: **GitHub Pages (UI) + Supabase (shared API/data)**.
+Always-on: **GitHub Pages (UI) + School Compass Supabase (shared data)**.
 
-## Recommended setup (always available)
+## Piggyback setup (no new Supabase project)
 
-| Layer | Role |
-| --- | --- |
-| GitHub Pages | Serves the static PWA at `https://<user>.github.io/chores/` |
-| Supabase | Shared chore database for every household device |
-| Polling | Browser refreshes the list every ~10s while the tab is open |
+We reuse the existing **School Compass** Supabase project (same one as
+Comparison-tool / [schoolcompass.uk](https://schoolcompass.uk)) because the
+free-tier project limit is full. Do **not** use the home_learning project.
 
-### 1. Create the Supabase table
+### 1. Create the `chores` table (one-time)
 
-1. Create a free project at [supabase.com](https://supabase.com)
-2. Open **SQL → New query**, paste [`supabase/schema.sql`](supabase/schema.sql), run it
-3. Project **Settings → API**: copy **Project URL** and **anon public** key
+1. Open the **School Compass** project in the Supabase dashboard  
+2. **SQL → New query**  
+3. Paste [`supabase/schema.sql`](supabase/schema.sql) → **Run**
 
-### 2. Point GitHub Pages at Supabase
+Until that runs, the Pages app cannot sync (it will fall back to on-device storage).
 
-Repo **Settings → Secrets and variables → Actions**:
+### 2. Deploy the site
 
-| Secret | Value |
-| --- | --- |
-| `SUPABASE_URL` | `https://xxxx.supabase.co` |
-| `SUPABASE_ANON_KEY` | Supabase anon/public key |
+1. Repo **Settings → Pages → Source: GitHub Actions**  
+2. Merge to `main` (or run **Deploy GitHub Pages**)  
+3. Open **`https://jamiefuller320.github.io/chores/`**
 
-Optional variable: `CHORES_POLL_MS` (default `10000`).
+`config.js` already points at the School Compass project URL + publishable key
+(the same client key schoolcompass.uk uses). Optional Actions secrets
+`SUPABASE_URL` / `SUPABASE_ANON_KEY` (or `NEXT_PUBLIC_*`) override those defaults.
 
-Also: **Settings → Pages → Source: GitHub Actions**.
+### Sync
 
-### 3. Deploy
-
-Merge to `main` or run the **Deploy GitHub Pages** workflow.
-
-Open **`https://<user>.github.io/chores/`** on iPhone/iPad (Add to Home Screen works).
-
-Any phone/tablet using that URL shares the same chore list via Supabase. Open tabs poll for updates about every 10 seconds (and refresh when you return to the tab).
-
-### Local config (optional)
-
-```bash
-cp web/public/config.example.js web/public/config.js
-# edit supabaseUrl + supabaseAnonKey
-npm run web   # still works; prefers Supabase when configured
-```
+Open tabs poll Supabase about every **10 seconds**, and refresh when you return
+to the tab — so iPhone and iPad stay aligned without localhost.
 
 ## Backend priority
 
-1. **Supabase** — if `config.js` has URL + anon key  
-2. **Local API** — `npm run web` (`.data/chores.json`)  
-3. **localStorage** — offline / Pages without secrets (per device only)
+1. **Supabase** (School Compass project) when configured  
+2. **Local API** — `npm run web`  
+3. **localStorage** — offline / before the SQL migration
+
+## Local
+
+```bash
+npm install
+npm run web   # http://127.0.0.1:4173
+```
 
 ## Chat assistant (optional)
-
-BDK agent tools remain available for natural-language chore help:
 
 ```bash
 npx @cursor/bdk validate --dir .

@@ -193,6 +193,12 @@ async function detectBackend() {
       await listSupabase("open");
       return "supabase";
     } catch (error) {
+      const message = String(error?.message || error);
+      if (/PGRST205|Could not find the table/i.test(message)) {
+        setStatus(
+          "Supabase is linked, but the chores table is missing — run supabase/schema.sql in the School Compass project.",
+        );
+      }
       console.warn("Supabase unavailable, falling back", error);
     }
   }

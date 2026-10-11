@@ -28,28 +28,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Write Supabase config from secrets
+      - name: Write Supabase config
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # Prefer chores-specific secrets; fall back to Comparison-tool names,
+          # then to the committed School Compass publishable defaults.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL || secrets.NEXT_PUBLIC_SUPABASE_URL || secrets.SCHOOL_COMPASS_SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY || secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
           CHORES_POLL_MS: ${{ vars.CHORES_POLL_MS }}
         run: |
           node <<'EOF'
           const fs = require("fs");
+          const defaults = {
+            supabaseUrl: "https://djjpznwiujujfoyvkmsp.supabase.co",
+            supabaseAnonKey: "sb_publishable_m5wzERqw-Qlp239zQ7eVaA_kOPsXxfJ",
+            pollIntervalMs: 10000,
+          };
           const cfg = {
-            supabaseUrl: process.env.SUPABASE_URL || "",
-            supabaseAnonKey: process.env.SUPABASE_ANON_KEY || "",
-            pollIntervalMs: Number(process.env.CHORES_POLL_MS || 10000) || 10000,
+            supabaseUrl: process.env.SUPABASE_URL || defaults.supabaseUrl,
+            supabaseAnonKey: process.env.SUPABASE_ANON_KEY || defaults.supabaseAnonKey,
+            pollIntervalMs: Number(process.env.CHORES_POLL_MS || defaults.pollIntervalMs) || 10000,
           };
           fs.writeFileSync(
             "web/public/config.js",
             `window.CHORES_CONFIG = ${JSON.stringify(cfg, null, 2)};\n`,
           );
-          if (!cfg.supabaseUrl || !cfg.supabaseAnonKey) {
-            console.log("No Supabase secrets set; Pages will use localStorage fallback.");
-          } else {
-            console.log("Wrote Supabase config for Pages deploy.");
-          }
+          console.log(`Supabase host: ${new URL(cfg.supabaseUrl).host}`);
           EOF
 
       - name: Setup Pages

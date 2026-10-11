@@ -1,6 +1,7 @@
-// Copy to config.js (or set GitHub Actions secrets SUPABASE_URL + SUPABASE_ANON_KEY).
+// Piggyback the School Compass project (not home_learning).
+// Defaults in config.js already point there; override only if needed.
 window.CHORES_CONFIG = {
-  supabaseUrl: "https://YOUR_PROJECT.supabase.co",
-  supabaseAnonKey: "YOUR_SUPABASE_ANON_KEY",
+  supabaseUrl: "https://djjpznwiujujfoyvkmsp.supabase.co",
+  supabaseAnonKey: "sb_publishable_…",
   pollIntervalMs: 10000,
 };

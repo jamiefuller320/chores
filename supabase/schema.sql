@@ -1,5 +1,12 @@
--- Chores household board for GitHub Pages + Supabase.
--- Run this once in the Supabase SQL editor.
+-- Household chores table — piggyback on the existing School Compass Supabase
+-- project (same project as Comparison-tool / schoolcompass.uk).
+-- Do NOT run this on the home_learning project.
+--
+-- One-time setup:
+--   1. Open the School Compass project in Supabase
+--   2. SQL → New query → paste this file → Run
+--
+-- Safe to re-run.
 
 create table if not exists public.chores (
   id text primary key,
@@ -18,26 +25,38 @@ create index if not exists chores_created_at_idx on public.chores (created_at de
 
 alter table public.chores enable row level security;
 
+revoke all on table public.chores from anon, authenticated;
+grant select, insert, update, delete on table public.chores to anon;
+grant select, insert, update, delete on table public.chores to service_role;
+
+drop policy if exists chores_anon_select on public.chores;
+drop policy if exists chores_anon_insert on public.chores;
+drop policy if exists chores_anon_update on public.chores;
+drop policy if exists chores_anon_delete on public.chores;
 drop policy if exists "chores_anon_select" on public.chores;
 drop policy if exists "chores_anon_insert" on public.chores;
 drop policy if exists "chores_anon_update" on public.chores;
 drop policy if exists "chores_anon_delete" on public.chores;
 
--- Private household use: anon key can read/write this table.
--- Tighten later with Supabase Auth if you need per-user access.
-create policy "chores_anon_select"
-  on public.chores for select to anon using (true);
+create policy chores_anon_select
+  on public.chores for select to anon
+  using (true);
 
-create policy "chores_anon_insert"
-  on public.chores for insert to anon with check (true);
+create policy chores_anon_insert
+  on public.chores for insert to anon
+  with check (
+    status in ('open', 'done')
+    and char_length(title) between 1 and 200
+  );
 
-create policy "chores_anon_update"
-  on public.chores for update to anon using (true) with check (true);
+create policy chores_anon_update
+  on public.chores for update to anon
+  using (true)
+  with check (status in ('open', 'done'));
 
-create policy "chores_anon_delete"
-  on public.chores for delete to anon using (true);
+create policy chores_anon_delete
+  on public.chores for delete to anon
+  using (true);
 
--- Optional: live updates (UI also polls as a fallback).
--- Dashboard → Database → Publications → supabase_realtime → enable `chores`
--- or run:
+-- Optional realtime (UI also polls every ~10s):
 -- alter publication supabase_realtime add table public.chores;

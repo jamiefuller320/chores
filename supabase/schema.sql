@@ -138,13 +138,10 @@ create table if not exists public.task_templates (
   created_at timestamptz not null default now()
 );
 
--- Additive columns when the table already existed without them.
-alter table public.task_templates
-  add column if not exists recurrence_interval integer;
-alter table public.task_templates
-  add column if not exists recurrence_unit text;
-alter table public.task_templates
-  add column if not exists points integer not null default 1;
+-- Additive columns when the table already existed without them (single-line for paste safety).
+alter table public.task_templates add column if not exists recurrence_interval integer;
+alter table public.task_templates add column if not exists recurrence_unit text;
+alter table public.task_templates add column if not exists points integer not null default 1;
 
 do $$
 begin
@@ -284,15 +281,10 @@ create table if not exists public.completion_events (
   created_at timestamptz not null default now()
 );
 
-alter table public.completion_events
-  add column if not exists assessment_status text not null default 'pending';
-alter table public.completion_events
-  add column if not exists points_awarded integer;
-alter table public.completion_events
-  add column if not exists assessed_by_person_id text
-    references public.people (id) on delete set null;
-alter table public.completion_events
-  add column if not exists assessed_at timestamptz;
+alter table public.completion_events add column if not exists assessment_status text not null default 'pending';
+alter table public.completion_events add column if not exists points_awarded integer;
+alter table public.completion_events add column if not exists assessed_by_person_id text references public.people (id) on delete set null;
+alter table public.completion_events add column if not exists assessed_at timestamptz;
 
 do $$
 begin

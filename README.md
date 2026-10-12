@@ -87,6 +87,10 @@ npm install
 npm run web   # http://127.0.0.1:4173
 ```
 
+`npm run web` serves the legacy flat API. For the rich localStorage UI without
+Supabase, open with `?local=1` (or set `localStorage.chores.forceLocal = "1"`).
+GitHub Pages uses Supabase when the schema is applied, else on-device storage.
+
 ## Chat assistant (optional)
 
 ```bash

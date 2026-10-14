@@ -159,14 +159,20 @@
             placeholder="Clear surface&#10;Wipe with cloth&#10;Put items back"
           ></textarea>
           <label class="field-label" for="referencePhoto">What good looks like</label>
-          <input
-            id="referencePhoto"
-            name="referencePhoto"
-            type="file"
-            accept="image/*"
-            capture="environment"
-            aria-label="Reference photo"
-          />
+          <div class="ref-photo-row">
+            <button type="button" id="reference-open-camera" class="ghost">
+              Open camera
+            </button>
+            <input
+              id="referencePhoto"
+              name="referencePhoto"
+              type="file"
+              accept="image/*"
+              capture="environment"
+              aria-label="Reference photo"
+            />
+          </div>
+          <p id="reference-camera-status" class="field-hint"></p>
         </details>
         <p id="form-status" class="form-status" role="status" aria-live="polite"></p>
       </form>
@@ -176,20 +182,75 @@
       <form method="dialog" id="complete-form" class="sheet-body">
         <h2 class="sheet-title">Mark done?</h2>
         <p id="complete-title" class="sheet-subtitle"></p>
-        <label class="field-label" for="proofPhoto">Proof photo (optional, kept ~7 days)</label>
+
+        <label class="field-label" for="complete-person">Who did it?</label>
+        <select id="complete-person" name="completePerson" required aria-label="Who completed this task">
+          <option value="">Choose a name…</option>
+        </select>
+
+        <div class="camera-block" id="proof-camera-block">
+          <p class="field-label">Evidence photo (optional, kept ~7 days)</p>
+          <div class="camera-stage">
+            <video
+              id="proof-video"
+              class="camera-video hidden"
+              autoplay
+              playsinline
+              muted
+            ></video>
+            <img id="proof-preview" class="camera-preview hidden" alt="Evidence preview" />
+            <canvas id="proof-canvas" class="hidden" aria-hidden="true"></canvas>
+          </div>
+          <div class="camera-actions">
+            <button type="button" id="proof-open-camera" class="primary">
+              Open camera
+            </button>
+            <button type="button" id="proof-shutter" class="primary hidden">
+              Take photo
+            </button>
+            <button type="button" id="proof-retake" class="ghost hidden">
+              Retake
+            </button>
+            <button type="button" id="proof-pick-file" class="ghost">
+              Photo library
+            </button>
+          </div>
+          <input
+            id="proofPhoto"
+            name="proofPhoto"
+            type="file"
+            accept="image/*"
+            capture="environment"
+            class="visually-hidden"
+            tabindex="-1"
+          />
+          <p id="proof-camera-status" class="field-hint" aria-live="polite"></p>
+        </div>
+
+        <label class="field-label" for="complete-minutes">How long? (minutes, optional)</label>
         <input
-          id="proofPhoto"
-          name="proofPhoto"
-          type="file"
-          accept="image/*"
-          capture="environment"
+          id="complete-minutes"
+          name="actualMinutes"
+          type="number"
+          min="1"
+          max="600"
+          inputmode="numeric"
+          placeholder="Skip"
         />
+        <label class="field-label" for="complete-difficulty">How hard? (optional)</label>
+        <select id="complete-difficulty" name="feltDifficulty" aria-label="How hard was this">
+          <option value="">Skip</option>
+          <option value="easy">Easy</option>
+          <option value="ok">OK</option>
+          <option value="hard">Hard</option>
+        </select>
+
         <p class="field-hint">
           Points are pending until an admin assesses this completion.
         </p>
         <div class="sheet-actions">
-          <button type="submit" value="cancel" class="ghost">Cancel</button>
-          <button type="submit" value="confirm" class="primary" id="complete-confirm">
+          <button type="button" id="complete-cancel" class="ghost">Cancel</button>
+          <button type="button" class="primary" id="complete-confirm">
             Done
           </button>
         </div>
@@ -234,19 +295,49 @@
         <label class="field-label" for="edit-steps">Steps (one per line)</label>
         <textarea id="edit-steps" name="steps" rows="3" maxlength="2000"></textarea>
         <label class="field-label" for="edit-referencePhoto">Replace reference photo</label>
-        <input
-          id="edit-referencePhoto"
-          name="referencePhoto"
-          type="file"
-          accept="image/*"
-          capture="environment"
-        />
+        <div class="ref-photo-row">
+          <button type="button" id="edit-reference-open-camera" class="ghost">
+            Open camera
+          </button>
+          <input
+            id="edit-referencePhoto"
+            name="referencePhoto"
+            type="file"
+            accept="image/*"
+            capture="environment"
+          />
+        </div>
         <p id="edit-ref-hint" class="field-hint"></p>
         <div class="sheet-actions">
           <button type="submit" value="cancel" class="ghost">Cancel</button>
           <button type="submit" value="save" class="primary">Save</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="camera-dialog" class="sheet">
+      <div class="sheet-body">
+        <h2 class="sheet-title">Take a photo</h2>
+        <p class="sheet-subtitle">Use the camera, then keep or retake.</p>
+        <div class="camera-stage">
+          <video
+            id="shared-video"
+            class="camera-video"
+            autoplay
+            playsinline
+            muted
+          ></video>
+          <img id="shared-preview" class="camera-preview hidden" alt="Photo preview" />
+          <canvas id="shared-canvas" class="hidden" aria-hidden="true"></canvas>
+        </div>
+        <div class="camera-actions">
+          <button type="button" id="shared-shutter" class="primary">Take photo</button>
+          <button type="button" id="shared-retake" class="ghost hidden">Retake</button>
+          <button type="button" id="shared-keep" class="primary hidden">Use photo</button>
+          <button type="button" id="shared-cancel" class="ghost">Cancel</button>
+        </div>
+        <p id="shared-camera-status" class="field-hint" aria-live="polite"></p>
+      </div>
     </dialog>
 
     <script src="./config.js"></script>

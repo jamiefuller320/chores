@@ -247,6 +247,67 @@ body {
   margin: 0.25rem 0 0.5rem;
 }
 
+.camera-block {
+  margin: 0.65rem 0 0.35rem;
+}
+
+.camera-stage {
+  display: none;
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border-radius: 16px;
+  overflow: hidden;
+  background: #12261f;
+  border: 1px solid var(--line);
+  margin-bottom: 0.55rem;
+}
+
+.camera-stage.is-live {
+  display: block;
+}
+
+.camera-video,
+.camera-preview {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #12261f;
+}
+
+.camera-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-bottom: 0.25rem;
+}
+
+.camera-actions .primary,
+.camera-actions .ghost {
+  min-height: 44px;
+  border-radius: 14px;
+  padding: 0.45rem 0.85rem;
+}
+
+.camera-actions .ghost {
+  border: 1px solid var(--line);
+  background: var(--paper-strong);
+  padding: 0.45rem 0.85rem;
+}
+
+.ref-photo-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.ref-photo-row input[type="file"] {
+  flex: 1 1 12rem;
+  min-height: 44px;
+}
+
 .scoreboard {
   display: flex;
   flex-direction: column;

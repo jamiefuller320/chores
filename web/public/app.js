@@ -23,7 +23,21 @@ const filterButtons = [...document.querySelectorAll(".filter")];
 const completeDialog = document.querySelector("#complete-dialog");
 const completeForm = document.querySelector("#complete-form");
 const completeTitleEl = document.querySelector("#complete-title");
+const completePersonSelect = document.querySelector("#complete-person");
+const completeMinutesInput = document.querySelector("#complete-minutes");
+const completeDifficultyInput = document.querySelector("#complete-difficulty");
 const proofPhotoInput = document.querySelector("#proofPhoto");
+const proofVideo = document.querySelector("#proof-video");
+const proofPreview = document.querySelector("#proof-preview");
+const proofCanvas = document.querySelector("#proof-canvas");
+const proofOpenCameraBtn = document.querySelector("#proof-open-camera");
+const proofShutterBtn = document.querySelector("#proof-shutter");
+const proofRetakeBtn = document.querySelector("#proof-retake");
+const proofPickFileBtn = document.querySelector("#proof-pick-file");
+const proofCameraStatus = document.querySelector("#proof-camera-status");
+const proofCameraStage = document.querySelector("#proof-camera-block .camera-stage");
+const referenceOpenCameraBtn = document.querySelector("#reference-open-camera");
+const referenceCameraStatus = document.querySelector("#reference-camera-status");
 const editDialog = document.querySelector("#edit-dialog");
 const editForm = document.querySelector("#edit-form");
 const editTitleInput = document.querySelector("#edit-title");
@@ -37,7 +51,18 @@ const editPointsInput = document.querySelector("#edit-points");
 const editDueDateInput = document.querySelector("#edit-dueDate");
 const editStepsInput = document.querySelector("#edit-steps");
 const editReferencePhotoInput = document.querySelector("#edit-referencePhoto");
+const editReferenceOpenCameraBtn = document.querySelector("#edit-reference-open-camera");
 const editRefHint = document.querySelector("#edit-ref-hint");
+const cameraDialog = document.querySelector("#camera-dialog");
+const sharedVideo = document.querySelector("#shared-video");
+const sharedPreview = document.querySelector("#shared-preview");
+const sharedCanvas = document.querySelector("#shared-canvas");
+const sharedShutterBtn = document.querySelector("#shared-shutter");
+const sharedRetakeBtn = document.querySelector("#shared-retake");
+const sharedKeepBtn = document.querySelector("#shared-keep");
+const sharedCancelBtn = document.querySelector("#shared-cancel");
+const sharedCameraStatus = document.querySelector("#shared-camera-status");
+const sharedCameraStage = document.querySelector("#camera-dialog .camera-stage");
 
 /** Base URL for this deploy (works on GitHub project Pages under /chores/). */
 const BASE = new URL("./", import.meta.url);
@@ -79,6 +104,16 @@ let pendingComplete = null;
 let pendingEdit = null;
 /** @type {boolean} */
 let paintedFromCache = false;
+/** @type {MediaStream | null} */
+let proofStream = null;
+/** @type {MediaStream | null} */
+let sharedStream = null;
+/** @type {File | null} */
+let proofCapturedFile = null;
+/** @type {((file: File | null) => void) | null} */
+let sharedCameraResolve = null;
+/** @type {File | null} */
+let sharedCapturedFile = null;
 
 const checkIcon = `
   <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
@@ -203,6 +238,223 @@ function paintFromSwrCache() {
         ? "Cached people — refreshing…"
         : "Showing cached list — refreshing…";
   return true;
+}
+
+function canUseGetUserMedia() {
+  return Boolean(navigator.mediaDevices?.getUserMedia);
+}
+
+function stopMediaStream(stream) {
+  if (!stream) return;
+  for (const track of stream.getTracks()) {
+    track.stop();
+  }
+}
+
+function stopProofCamera() {
+  stopMediaStream(proofStream);
+  proofStream = null;
+  if (proofVideo) {
+    proofVideo.srcObject = null;
+    proofVideo.classList.add("hidden");
+  }
+}
+
+function stopSharedCamera() {
+  stopMediaStream(sharedStream);
+  sharedStream = null;
+  if (sharedVideo) {
+    sharedVideo.srcObject = null;
+  }
+}
+
+async function canvasToImageFile(canvas, name = "photo.jpg") {
+  const blob = await new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (result) => {
+        if (result) resolve(result);
+        else reject(new Error("Could not capture photo"));
+      },
+      "image/jpeg",
+      0.92,
+    );
+  });
+  return new File([blob], name, { type: "image/jpeg" });
+}
+
+function assignFileToInput(input, file) {
+  if (!input || !file) return;
+  try {
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+    input.files = transfer.files;
+  } catch (error) {
+    console.warn("Could not assign file to input", error);
+  }
+}
+
+function resetProofCameraUi() {
+  stopProofCamera();
+  proofCapturedFile = null;
+  if (proofPhotoInput) proofPhotoInput.value = "";
+  if (proofPreview) {
+    proofPreview.src = "";
+    proofPreview.classList.add("hidden");
+  }
+  if (proofCanvas) proofCanvas.classList.add("hidden");
+  proofOpenCameraBtn?.classList.remove("hidden");
+  proofShutterBtn?.classList.add("hidden");
+  proofRetakeBtn?.classList.add("hidden");
+  proofCameraStage?.classList.remove("is-live");
+  if (proofCameraStatus) {
+    proofCameraStatus.textContent = canUseGetUserMedia()
+      ? "Open the camera for a quick proof shot, or use the photo library."
+      : "Camera API unavailable — use the photo library (or system camera via file picker).";
+  }
+}
+
+async function startProofCamera() {
+  if (!canUseGetUserMedia()) {
+    if (proofCameraStatus) {
+      proofCameraStatus.textContent =
+        "In-page camera blocked — opening the system camera / library.";
+    }
+    proofPhotoInput?.click();
+    return;
+  }
+  try {
+    stopProofCamera();
+    proofCapturedFile = null;
+    proofPreview?.classList.add("hidden");
+    proofStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1280 },
+        height: { ideal: 960 },
+      },
+    });
+    proofVideo.srcObject = proofStream;
+    proofVideo.classList.remove("hidden");
+    proofCameraStage?.classList.add("is-live");
+    proofOpenCameraBtn?.classList.add("hidden");
+    proofShutterBtn?.classList.remove("hidden");
+    proofRetakeBtn?.classList.add("hidden");
+    if (proofCameraStatus) {
+      proofCameraStatus.textContent = "Aim at the finished work, then take a photo.";
+    }
+    await proofVideo.play().catch(() => {});
+  } catch (error) {
+    console.warn("getUserMedia failed", error);
+    if (proofCameraStatus) {
+      proofCameraStatus.textContent =
+        "Could not open in-page camera — falling back to photo library.";
+    }
+    proofPhotoInput?.click();
+  }
+}
+
+async function shutterProofCamera() {
+  if (!proofVideo || !proofCanvas || !proofStream) return;
+  const width = proofVideo.videoWidth || 1280;
+  const height = proofVideo.videoHeight || 960;
+  proofCanvas.width = width;
+  proofCanvas.height = height;
+  const ctx = proofCanvas.getContext("2d");
+  if (!ctx) throw new Error("Could not capture frame");
+  ctx.drawImage(proofVideo, 0, 0, width, height);
+  const file = await canvasToImageFile(proofCanvas, `proof_${Date.now()}.jpg`);
+  proofCapturedFile = file;
+  assignFileToInput(proofPhotoInput, file);
+  proofPreview.src = URL.createObjectURL(file);
+  proofPreview.classList.remove("hidden");
+  proofVideo.classList.add("hidden");
+  stopProofCamera();
+  proofShutterBtn?.classList.add("hidden");
+  proofRetakeBtn?.classList.remove("hidden");
+  proofOpenCameraBtn?.classList.add("hidden");
+  proofCameraStage?.classList.add("is-live");
+  if (proofCameraStatus) {
+    proofCameraStatus.textContent = "Photo ready — retake if you want another shot.";
+  }
+}
+
+function fillCompletePersonSelect() {
+  const previous =
+    completePersonSelect.value ||
+    meSelect.value ||
+    localStorage.getItem(ME_KEY) ||
+    "";
+  completePersonSelect.innerHTML = `<option value="">Choose a name…</option>`;
+  for (const person of people) {
+    const opt = document.createElement("option");
+    opt.value = person.id;
+    opt.textContent = person.displayName;
+    completePersonSelect.append(opt);
+  }
+  if (previous && people.some((p) => p.id === previous)) {
+    completePersonSelect.value = previous;
+  }
+}
+
+async function openSharedCamera() {
+  return new Promise((resolve) => {
+    sharedCameraResolve = resolve;
+    sharedPreview?.classList.add("hidden");
+    sharedKeepBtn?.classList.add("hidden");
+    sharedRetakeBtn?.classList.add("hidden");
+    sharedShutterBtn?.classList.remove("hidden");
+    sharedCameraStage?.classList.add("is-live");
+    if (sharedCameraStatus) {
+      sharedCameraStatus.textContent = "Starting camera…";
+    }
+    if (typeof cameraDialog.showModal === "function") {
+      cameraDialog.showModal();
+    }
+    void (async () => {
+      if (!canUseGetUserMedia()) {
+        if (sharedCameraStatus) {
+          sharedCameraStatus.textContent =
+            "In-page camera unavailable on this browser.";
+        }
+        return;
+      }
+      try {
+        stopSharedCamera();
+        sharedStream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1280 },
+            height: { ideal: 960 },
+          },
+        });
+        sharedVideo.srcObject = sharedStream;
+        sharedVideo.classList.remove("hidden");
+        await sharedVideo.play().catch(() => {});
+        if (sharedCameraStatus) {
+          sharedCameraStatus.textContent = "Take a photo of the standard.";
+        }
+      } catch (error) {
+        console.warn("Shared camera failed", error);
+        if (sharedCameraStatus) {
+          sharedCameraStatus.textContent =
+            "Could not open camera. Use the file picker instead.";
+        }
+      }
+    })();
+  });
+}
+
+function closeSharedCamera(file) {
+  stopSharedCamera();
+  sharedPreview?.classList.add("hidden");
+  sharedVideo?.classList.remove("hidden");
+  sharedCameraStage?.classList.remove("is-live");
+  const resolve = sharedCameraResolve;
+  sharedCameraResolve = null;
+  if (cameraDialog?.open) cameraDialog.close();
+  resolve?.(file ?? null);
 }
 
 function resolveRecurrence(kind, interval, unit) {
@@ -871,13 +1123,20 @@ async function scheduleNextRich(chore, completedAt) {
   });
 }
 
-async function completeRich(chore, proofFile) {
+async function completeRich(chore, options = {}) {
+  const proofFile = options.proofFile ?? null;
+  const personId =
+    options.personId || meSelect.value || chore.assigneePersonId || null;
+  const actualMinutes = options.actualMinutes;
+  const feltDifficulty = options.feltDifficulty;
   const now = new Date().toISOString();
   let proofPath = null;
   if (proofFile) {
     proofPath = await uploadPhoto(proofFile, "proof");
   }
-  const meId = meSelect.value || chore.assigneePersonId || null;
+  const person = personId
+    ? people.find((p) => p.id === personId) || null
+    : null;
   const completionId = newId("comp");
   await supabaseRequest(
     `task_instances?id=eq.${encodeURIComponent(chore.id)}`,
@@ -887,6 +1146,13 @@ async function completeRich(chore, proofFile) {
       body: JSON.stringify({
         status: "done",
         completed_at: now,
+        ...(person
+          ? {
+              assignee_person_id: person.id,
+              assignee: person.displayName,
+              assigned_at: chore.assigneePersonId ? undefined : now,
+            }
+          : {}),
       }),
     },
   );
@@ -897,8 +1163,10 @@ async function completeRich(chore, proofFile) {
       id: completionId,
       instance_id: chore.id,
       template_id: chore.templateId ?? null,
-      person_id: meId,
+      person_id: personId,
       completed_at: now,
+      actual_minutes: actualMinutes ?? null,
+      felt_difficulty: feltDifficulty ?? null,
       proof_photo_path: proofPath,
       proof_expires_at: proofPath ? proofExpiresAt(now) : null,
       assessment_status: "pending",
@@ -1524,28 +1792,6 @@ function render() {
         openEditDialog(chore);
       });
       actions.append(edit);
-      if (!done && chore.instanceStatus !== "waiting" && backend !== "api") {
-        const claim = document.createElement("button");
-        claim.type = "button";
-        claim.className = "text-btn";
-        claim.textContent = chore.assignee ? "Reclaim" : "I’ll do it";
-        claim.addEventListener("click", () => {
-          void claimChore(chore);
-        });
-        actions.append(claim);
-      }
-      body.append(actions);
-    } else if (!done && chore.instanceStatus !== "waiting") {
-      const actions = document.createElement("div");
-      actions.className = "chore-actions";
-      const claim = document.createElement("button");
-      claim.type = "button";
-      claim.className = "text-btn";
-      claim.textContent = chore.assignee ? "Reclaim" : "I’ll do it";
-      claim.addEventListener("click", () => {
-        void claimChore(chore);
-      });
-      actions.append(claim);
       body.append(actions);
     }
 
@@ -1992,13 +2238,25 @@ function onCheckClick(chore) {
     setStatus("This task is resting until its next due date.");
     return;
   }
+  openMarkDoneDialog(chore);
+}
+
+function openMarkDoneDialog(chore) {
   pendingComplete = chore;
   completeTitleEl.textContent = chore.title;
-  proofPhotoInput.value = "";
+  fillCompletePersonSelect();
+  if (chore.assigneePersonId && people.some((p) => p.id === chore.assigneePersonId)) {
+    completePersonSelect.value = chore.assigneePersonId;
+  }
+  completeMinutesInput.value = "";
+  completeDifficultyInput.value = "";
+  resetProofCameraUi();
   if (typeof completeDialog.showModal === "function") {
     completeDialog.showModal();
   } else {
-    void finishComplete(chore, null);
+    void finishComplete(chore, {
+      personId: completePersonSelect.value || meSelect.value || null,
+    });
   }
 }
 
@@ -2030,12 +2288,30 @@ async function reopenChore(chore) {
   }
 }
 
-async function finishComplete(chore, proofFile) {
+async function finishComplete(chore, options = {}) {
+  const proofFile = options.proofFile ?? null;
+  const personId = options.personId || null;
+  const actualMinutes = options.actualMinutes;
+  const feltDifficulty = options.feltDifficulty;
   try {
+    if (personId) {
+      meSelect.value = personId;
+      localStorage.setItem(ME_KEY, personId);
+      syncComposerAdminUi();
+    }
     if (backend === "supabase-rich") {
-      await completeRich(chore, proofFile);
+      await completeRich(chore, {
+        proofFile,
+        personId,
+        actualMinutes,
+        feltDifficulty,
+      });
     } else if (backend === "supabase") {
-      await updateLegacySupabase(chore.id, { status: "done" });
+      const person = people.find((p) => p.id === personId);
+      await updateLegacySupabase(chore.id, {
+        status: "done",
+        ...(person ? { assignee: person.displayName } : {}),
+      });
     } else if (backend === "api") {
       await api(`api/chores/${encodeURIComponent(chore.id)}`, {
         method: "PATCH",
@@ -2047,10 +2323,19 @@ async function finishComplete(chore, proofFile) {
       if (index < 0) throw new Error("Task not found");
       const now = new Date().toISOString();
       const current = store.instances[index];
+      const person = personId
+        ? store.people.find((p) => p.id === personId)
+        : null;
       store.instances[index] = {
         ...current,
         status: "done",
         completedAt: now,
+        ...(person
+          ? {
+              assigneePersonId: person.id,
+              assignee: person.displayName ?? person.display_name,
+            }
+          : {}),
       };
       let proofPath = null;
       if (proofFile) {
@@ -2060,8 +2345,10 @@ async function finishComplete(chore, proofFile) {
         id: newId("comp"),
         instanceId: chore.id,
         templateId: chore.templateId,
-        personId: meSelect.value || undefined,
+        personId: personId || undefined,
         completedAt: now,
+        actualMinutes: actualMinutes ?? undefined,
+        feltDifficulty: feltDifficulty ?? undefined,
         proofPhotoPath: proofPath || undefined,
         proofExpiresAt: proofPath ? proofExpiresAt(now) : undefined,
         assessmentStatus: "pending",
@@ -2091,12 +2378,14 @@ async function finishComplete(chore, proofFile) {
     }
     setStatus(
       proofFile
-        ? `Marked done (proof kept ~${PROOF_TTL_DAYS} days). Pending parent assessment.`
-        : "Marked done. Pending parent assessment.",
+        ? `Marked done (proof kept ~${PROOF_TTL_DAYS} days). Pending assessment.`
+        : "Marked done. Pending assessment.",
     );
     await loadChores({ quiet: true });
   } catch (error) {
     setStatus(error.message);
+  } finally {
+    stopProofCamera();
   }
 }
 
@@ -2109,17 +2398,193 @@ function fileToDataUrl(file) {
   });
 }
 
-completeForm.addEventListener("submit", (event) => {
-  const submitter = event.submitter;
-  const value = submitter?.value || "cancel";
-  if (value !== "confirm" || !pendingComplete) {
-    pendingComplete = null;
+document.querySelector("#complete-confirm")?.addEventListener("click", () => {
+  if (!pendingComplete) return;
+  const personId = completePersonSelect.value;
+  if (!personId) {
+    setStatus("Choose who did it before marking done.");
+    if (proofCameraStatus) {
+      proofCameraStatus.textContent = "Pick a name under “Who did it?”.";
+    }
+    completePersonSelect.focus();
+    return;
+  }
+  if (people.length === 0) {
+    setStatus("Add a person under People first.");
     return;
   }
   const chore = pendingComplete;
-  const file = proofPhotoInput.files?.[0] ?? null;
+  const file = proofCapturedFile || proofPhotoInput.files?.[0] || null;
+  const minutesRaw = completeMinutesInput.value.trim();
+  const actualMinutes = minutesRaw
+    ? Math.max(1, Math.floor(Number(minutesRaw)))
+    : undefined;
+  const feltDifficulty = completeDifficultyInput.value || undefined;
   pendingComplete = null;
-  void finishComplete(chore, file);
+  completeDialog.close();
+  void finishComplete(chore, {
+    proofFile: file,
+    personId,
+    actualMinutes,
+    feltDifficulty,
+  });
+});
+
+document.querySelector("#complete-cancel")?.addEventListener("click", () => {
+  pendingComplete = null;
+  stopProofCamera();
+  completeDialog.close();
+});
+
+completeDialog.addEventListener("close", () => {
+  stopProofCamera();
+});
+
+// Prevent accidental Enter submits from closing without validation.
+completeForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+});
+
+proofOpenCameraBtn?.addEventListener("click", () => {
+  void startProofCamera();
+});
+
+proofShutterBtn?.addEventListener("click", () => {
+  void shutterProofCamera().catch((error) => {
+    if (proofCameraStatus) proofCameraStatus.textContent = error.message;
+  });
+});
+
+proofRetakeBtn?.addEventListener("click", () => {
+  resetProofCameraUi();
+  void startProofCamera();
+});
+
+proofPickFileBtn?.addEventListener("click", () => {
+  stopProofCamera();
+  proofPhotoInput?.click();
+});
+
+proofPhotoInput?.addEventListener("change", () => {
+  const file = proofPhotoInput.files?.[0] ?? null;
+  proofCapturedFile = file;
+  if (file && proofPreview) {
+    proofPreview.src = URL.createObjectURL(file);
+    proofPreview.classList.remove("hidden");
+    proofVideo?.classList.add("hidden");
+    proofCameraStage?.classList.add("is-live");
+    proofOpenCameraBtn?.classList.add("hidden");
+    proofShutterBtn?.classList.add("hidden");
+    proofRetakeBtn?.classList.remove("hidden");
+    if (proofCameraStatus) {
+      proofCameraStatus.textContent = "Photo ready from library.";
+    }
+  }
+});
+
+referenceOpenCameraBtn?.addEventListener("click", () => {
+  void (async () => {
+    if (!canUseGetUserMedia()) {
+      referencePhotoInput?.click();
+      if (referenceCameraStatus) {
+        referenceCameraStatus.textContent =
+          "In-page camera unavailable — use the file picker.";
+      }
+      return;
+    }
+    const file = await openSharedCamera();
+    if (file) {
+      assignFileToInput(referencePhotoInput, file);
+      if (referenceCameraStatus) {
+        referenceCameraStatus.textContent = "Reference photo captured.";
+      }
+    }
+  })();
+});
+
+editReferenceOpenCameraBtn?.addEventListener("click", () => {
+  void (async () => {
+    if (!canUseGetUserMedia()) {
+      editReferencePhotoInput?.click();
+      return;
+    }
+    const file = await openSharedCamera();
+    if (file) {
+      assignFileToInput(editReferencePhotoInput, file);
+      editRefHint.textContent = "New reference photo captured — save to keep it.";
+    }
+  })();
+});
+
+sharedShutterBtn?.addEventListener("click", () => {
+  void (async () => {
+    if (!sharedVideo || !sharedCanvas || !sharedStream) return;
+    const width = sharedVideo.videoWidth || 1280;
+    const height = sharedVideo.videoHeight || 960;
+    sharedCanvas.width = width;
+    sharedCanvas.height = height;
+    const ctx = sharedCanvas.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(sharedVideo, 0, 0, width, height);
+    const file = await canvasToImageFile(
+      sharedCanvas,
+      `reference_${Date.now()}.jpg`,
+    );
+    sharedCapturedFile = file;
+    sharedPreview.src = URL.createObjectURL(file);
+    sharedPreview.classList.remove("hidden");
+    sharedVideo.classList.add("hidden");
+    stopSharedCamera();
+    sharedShutterBtn.classList.add("hidden");
+    sharedRetakeBtn.classList.remove("hidden");
+    sharedKeepBtn.classList.remove("hidden");
+    if (sharedCameraStatus) {
+      sharedCameraStatus.textContent = "Keep this photo or retake.";
+    }
+  })();
+});
+
+sharedRetakeBtn?.addEventListener("click", () => {
+  sharedCapturedFile = null;
+  sharedPreview?.classList.add("hidden");
+  sharedKeepBtn?.classList.add("hidden");
+  sharedRetakeBtn?.classList.add("hidden");
+  sharedShutterBtn?.classList.remove("hidden");
+  void (async () => {
+    try {
+      sharedStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: "environment" } },
+      });
+      sharedVideo.srcObject = sharedStream;
+      sharedVideo.classList.remove("hidden");
+      await sharedVideo.play().catch(() => {});
+    } catch (error) {
+      if (sharedCameraStatus) {
+        sharedCameraStatus.textContent = error.message;
+      }
+    }
+  })();
+});
+
+sharedKeepBtn?.addEventListener("click", () => {
+  const file = sharedCapturedFile;
+  sharedCapturedFile = null;
+  closeSharedCamera(file);
+});
+
+sharedCancelBtn?.addEventListener("click", () => {
+  sharedCapturedFile = null;
+  closeSharedCamera(null);
+});
+
+cameraDialog?.addEventListener("close", () => {
+  if (sharedCameraResolve) {
+    sharedCapturedFile = null;
+    closeSharedCamera(null);
+  } else {
+    stopSharedCamera();
+  }
 });
 
 function startPolling() {

@@ -62,8 +62,8 @@ reconciles with Supabase in the background.
 - **People** — **People** tab: add name + role (`parent` / `child` / `other`), list and change roles.
 - **Points** — point value is on the add form (not buried) and editable per task; **Scores** tab shows approved totals.
 - **Fast load** — open tasks / scoreboard paint from a localStorage cache first, then revalidate against Supabase (stale-while-revalidate).
-- **Self-assign** — pick “I am …” then **I’ll do it** on an open task (assign-by-name still works).
-- **Template steps** + **reference photo** — “what good looks like” on add/edit.
+- **Mark done** — tap the check on an open task → popup asks **who did it**, optional **in-page camera** evidence (fallback: photo library / `capture`), and optional how-long / how-hard. No separate “I’ll do it” claim step. Assign-by-name on add/edit still works; “I am …” pre-fills the name picker.
+- **Template steps** + **reference photo** — “what good looks like” on add/edit (camera helper available).
 - **Proof photo** on complete — optional; retained **~7 days** or until the next completion for that template (whichever first).
 - **Recurrence** — periodic tasks default to **every 4 weeks**; custom every **N days** or **N weeks**. Completing a recurring task schedules the next cycle (`waiting` until due).
 - **Assessment** — completing a task leaves it **pending**; points count only after **approve** (or reject).

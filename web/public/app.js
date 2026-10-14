@@ -1,10 +1,12 @@
 const listEl = document.querySelector("#chore-list");
 const scoreboardEl = document.querySelector("#scoreboard");
+const peoplePanelEl = document.querySelector("#people-panel");
 const emptyEl = document.querySelector("#empty-state");
 const summaryEl = document.querySelector("#summary");
 const form = document.querySelector("#add-form");
 const formStatus = document.querySelector("#form-status");
 const titleInput = document.querySelector("#title");
+const descriptionInput = document.querySelector("#description");
 const assigneeInput = document.querySelector("#assignee");
 const dueDateInput = document.querySelector("#dueDate");
 const kindInput = document.querySelector("#kind");
@@ -15,9 +17,6 @@ const pointsFields = document.querySelector("#points-fields");
 const pointsInput = document.querySelector("#points");
 const stepsInput = document.querySelector("#steps");
 const referencePhotoInput = document.querySelector("#referencePhoto");
-const personNameInput = document.querySelector("#personName");
-const personRoleInput = document.querySelector("#personRole");
-const addPersonBtn = document.querySelector("#add-person");
 const meSelect = document.querySelector("#me-person");
 const adminHint = document.querySelector("#admin-hint");
 const filterButtons = [...document.querySelectorAll(".filter")];
@@ -25,18 +24,39 @@ const completeDialog = document.querySelector("#complete-dialog");
 const completeForm = document.querySelector("#complete-form");
 const completeTitleEl = document.querySelector("#complete-title");
 const proofPhotoInput = document.querySelector("#proofPhoto");
+const editDialog = document.querySelector("#edit-dialog");
+const editForm = document.querySelector("#edit-form");
+const editTitleInput = document.querySelector("#edit-title");
+const editDescriptionInput = document.querySelector("#edit-description");
+const editAssigneeInput = document.querySelector("#edit-assignee");
+const editKindInput = document.querySelector("#edit-kind");
+const editRecurrenceFields = document.querySelector("#edit-recurrence-fields");
+const editRecurrenceIntervalInput = document.querySelector("#edit-recurrenceInterval");
+const editRecurrenceUnitInput = document.querySelector("#edit-recurrenceUnit");
+const editPointsInput = document.querySelector("#edit-points");
+const editDueDateInput = document.querySelector("#edit-dueDate");
+const editStepsInput = document.querySelector("#edit-steps");
+const editReferencePhotoInput = document.querySelector("#edit-referencePhoto");
+const editRefHint = document.querySelector("#edit-ref-hint");
 
 /** Base URL for this deploy (works on GitHub project Pages under /chores/). */
 const BASE = new URL("./", import.meta.url);
 const STORAGE_KEY_V1 = "chores.household.v1";
 const STORAGE_KEY_V2 = "chores.household.v2";
 const ME_KEY = "chores.me.personId";
+/** Stale-while-revalidate cache for list/scoreboard paint. */
+const SWR_CACHE_KEY = "chores.swr.v1";
 const CONFIG = window.CHORES_CONFIG ?? {};
 const PROOF_TTL_DAYS = 7;
 const PHOTO_BUCKET = "chore-photos";
 const DEFAULT_PERIODIC_INTERVAL = 4;
 const DEFAULT_PERIODIC_UNIT = "week";
 const DEFAULT_TASK_POINTS = 1;
+/**
+ * v1 product default: treat the Pages UI as full parent/admin mode.
+ * Real logins + password-reset authority come later (see chore-model-plan).
+ */
+const ADMIN_UI_MODE = true;
 
 let filter = "open";
 /** @type {Array<Record<string, unknown>>} */
@@ -55,6 +75,10 @@ let backend = "local";
 let pollTimer = null;
 /** @type {Record<string, unknown> | null} */
 let pendingComplete = null;
+/** @type {Record<string, unknown> | null} */
+let pendingEdit = null;
+/** @type {boolean} */
+let paintedFromCache = false;
 
 const checkIcon = `
   <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
@@ -108,7 +132,77 @@ function currentPerson() {
 }
 
 function isAdmin() {
+  // Full admin UI for now; later gate on parent login / Auth.
+  if (ADMIN_UI_MODE) return true;
   return isAdminRole(currentPerson()?.role);
+}
+
+function stepsToTextarea(steps) {
+  if (!Array.isArray(steps) || steps.length === 0) return "";
+  return [...steps]
+    .sort((a, b) => (a.ordinal ?? 0) - (b.ordinal ?? 0))
+    .map((s) => s.text)
+    .join("\n");
+}
+
+function readSwrCache() {
+  try {
+    const raw = localStorage.getItem(SWR_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeSwrCache() {
+  try {
+    const openViews = (chores || []).filter(
+      (c) =>
+        c.instanceStatus === "noticed" ||
+        c.instanceStatus === "open" ||
+        c.instanceStatus === "assigned" ||
+        (c.status === "open" && !c.instanceStatus),
+    );
+    const payload = {
+      savedAt: Date.now(),
+      backend,
+      people,
+      scoreRows,
+      openChores: openViews,
+      allChores: chores,
+    };
+    localStorage.setItem(SWR_CACHE_KEY, JSON.stringify(payload));
+  } catch (error) {
+    console.warn("SWR cache write failed", error);
+  }
+}
+
+function paintFromSwrCache() {
+  const cached = readSwrCache();
+  if (!cached) return false;
+  people = Array.isArray(cached.people) ? cached.people : [];
+  scoreRows = Array.isArray(cached.scoreRows) ? cached.scoreRows : [];
+  if (filter === "open" && Array.isArray(cached.openChores)) {
+    chores = cached.openChores;
+  } else if (Array.isArray(cached.allChores)) {
+    chores = cached.allChores;
+  } else if (Array.isArray(cached.openChores)) {
+    chores = cached.openChores;
+  } else {
+    chores = [];
+  }
+  paintedFromCache = true;
+  render();
+  summaryEl.textContent =
+    filter === "scores"
+      ? "Cached scores — refreshing…"
+      : filter === "people"
+        ? "Cached people — refreshing…"
+        : "Showing cached list — refreshing…";
+  return true;
 }
 
 function resolveRecurrence(kind, interval, unit) {
@@ -175,11 +269,16 @@ function computeScoreboard(peopleList, completionList) {
 }
 
 function syncComposerAdminUi() {
-  const admin = isAdmin();
-  pointsFields.classList.toggle("hidden", !admin);
-  adminHint.classList.toggle("hidden", !admin);
+  pointsFields.classList.remove("hidden");
+  adminHint.classList.toggle("hidden", !ADMIN_UI_MODE && !isAdmin());
   const periodic = kindInput.value === "periodic";
   recurrenceFields.classList.toggle("hidden", !periodic);
+  if (editKindInput) {
+    editRecurrenceFields.classList.toggle(
+      "hidden",
+      editKindInput.value !== "periodic",
+    );
+  }
 }
 
 function supabaseConfigured() {
@@ -287,10 +386,12 @@ function instanceToView(row, template) {
   const completion = latestCompletionForInstance(row.id);
   const assessmentStatus =
     completion?.assessmentStatus ?? completion?.assessment_status ?? null;
+  const description =
+    row.description || template?.description || undefined;
   return {
     id: row.id,
     title: row.title,
-    ...(row.description ? { description: row.description } : {}),
+    ...(description ? { description } : {}),
     ...(row.assignee ? { assignee: row.assignee } : {}),
     status: openLike ? "open" : status === "waiting" ? "waiting" : "done",
     instanceStatus: status,
@@ -445,9 +546,10 @@ async function addRichSupabase(input) {
     input.recurrenceUnit,
   );
   const points =
-    isAdmin() && input.points !== undefined
+    input.points !== undefined
       ? Math.max(0, Math.floor(Number(input.points)))
       : DEFAULT_TASK_POINTS;
+  const description = input.description?.trim() || null;
   const templateId = newId("tmpl");
   const instanceId = newId("inst");
   await supabaseRequest("task_templates", {
@@ -456,6 +558,7 @@ async function addRichSupabase(input) {
     body: JSON.stringify({
       id: templateId,
       title: input.title.trim(),
+      description,
       kind,
       cooldown_days: recurrence.cooldownDays ?? null,
       recurrence_interval: recurrence.recurrenceInterval ?? null,
@@ -478,6 +581,7 @@ async function addRichSupabase(input) {
       id: instanceId,
       template_id: templateId,
       title: input.title.trim(),
+      description,
       estimated_minutes: 10,
       status: person ? "assigned" : "open",
       assignee_person_id: person?.id ?? null,
@@ -496,6 +600,7 @@ async function addRichSupabase(input) {
       body: JSON.stringify({
         id: instanceId,
         title: input.title.trim(),
+        description,
         assignee: person?.displayName ?? null,
         status: "open",
         due_date: input.dueDate || null,
@@ -508,6 +613,8 @@ async function addRichSupabase(input) {
   }
   templatesById.set(templateId, {
     id: templateId,
+    title: input.title.trim(),
+    description,
     kind,
     steps: input.steps ?? [],
     reference_photo_path: referencePath,
@@ -516,6 +623,160 @@ async function addRichSupabase(input) {
     points,
   });
   return instanceToView(rows[0], templatesById.get(templateId));
+}
+
+async function updateRichTask(chore, input) {
+  if (chore.mode !== "instance") {
+    throw new Error("Edit needs the rich task model.");
+  }
+  const now = new Date().toISOString();
+  const kind = input.kind || "once";
+  const recurrence = resolveRecurrence(
+    kind,
+    input.recurrenceInterval,
+    input.recurrenceUnit,
+  );
+  const points = Math.max(
+    0,
+    Math.floor(Number(input.points ?? DEFAULT_TASK_POINTS)),
+  );
+  const title = input.title.trim();
+  const description = input.description?.trim() || null;
+  const steps = input.steps ?? [];
+  let person = null;
+  if (input.assignee?.trim()) {
+    person = await findOrCreatePerson(input.assignee.trim());
+  }
+  let referencePath =
+    chore.referencePhotoPath ||
+    templatesById.get(chore.templateId)?.reference_photo_path ||
+    null;
+  if (input.referenceFile) {
+    referencePath = await uploadPhoto(input.referenceFile, "reference");
+  }
+
+  if (chore.templateId) {
+    await supabaseRequest(
+      `task_templates?id=eq.${encodeURIComponent(chore.templateId)}`,
+      {
+        method: "PATCH",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({
+          title,
+          description,
+          kind,
+          cooldown_days: recurrence.cooldownDays ?? null,
+          recurrence_interval: recurrence.recurrenceInterval ?? null,
+          recurrence_unit: recurrence.recurrenceUnit ?? null,
+          points,
+          steps,
+          reference_photo_path: referencePath,
+          default_assignee_person_id: person?.id ?? null,
+        }),
+      },
+    );
+    const prev = templatesById.get(chore.templateId) || { id: chore.templateId };
+    templatesById.set(chore.templateId, {
+      ...prev,
+      title,
+      description,
+      kind,
+      recurrence_interval: recurrence.recurrenceInterval,
+      recurrence_unit: recurrence.recurrenceUnit,
+      cooldown_days: recurrence.cooldownDays,
+      points,
+      steps,
+      reference_photo_path: referencePath,
+    });
+  }
+
+  const openLike =
+    chore.instanceStatus === "noticed" ||
+    chore.instanceStatus === "open" ||
+    chore.instanceStatus === "assigned" ||
+    chore.status === "open";
+  const instancePatch = {
+    title,
+    description,
+    due_date: input.dueDate || null,
+  };
+  if (openLike) {
+    if (person) {
+      instancePatch.status = "assigned";
+      instancePatch.assignee_person_id = person.id;
+      instancePatch.assignee = person.displayName;
+      instancePatch.assigned_at = now;
+    } else {
+      instancePatch.status =
+        chore.instanceStatus === "noticed" ? "noticed" : "open";
+      instancePatch.assignee_person_id = null;
+      instancePatch.assignee = null;
+      instancePatch.assigned_at = null;
+    }
+  }
+
+  const rows = await supabaseRequest(
+    `task_instances?id=eq.${encodeURIComponent(chore.id)}`,
+    {
+      method: "PATCH",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify(instancePatch),
+    },
+  );
+  if (!rows?.length) throw new Error(`No task with id ${chore.id}`);
+
+  try {
+    await supabaseRequest(`chores?id=eq.${encodeURIComponent(chore.id)}`, {
+      method: "PATCH",
+      headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({
+        title,
+        description,
+        assignee: person?.displayName ?? null,
+        due_date: input.dueDate || null,
+      }),
+    });
+  } catch {
+    /* optional mirror */
+  }
+
+  return instanceToView(
+    rows[0],
+    chore.templateId ? templatesById.get(chore.templateId) : null,
+  );
+}
+
+async function updatePersonRole(personId, role) {
+  if (!["parent", "child", "other"].includes(role)) {
+    throw new Error("Role must be parent, child, or other.");
+  }
+  if (backend === "supabase-rich") {
+    await supabaseRequest(`people?id=eq.${encodeURIComponent(personId)}`, {
+      method: "PATCH",
+      headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({ role }),
+    });
+    people = people
+      .map((p) => (p.id === personId ? { ...p, role } : p))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
+    scoreRows = computeScoreboard(people, completions);
+    return;
+  }
+  if (backend === "local") {
+    const store = loadLocalV2();
+    const index = store.people.findIndex((p) => p.id === personId);
+    if (index < 0) throw new Error("Person not found");
+    store.people[index] = { ...store.people[index], role };
+    saveLocalV2(store);
+    people = store.people.map((p) => ({
+      id: p.id,
+      displayName: p.displayName ?? p.display_name,
+      role: p.role ?? "child",
+    }));
+    scoreRows = computeScoreboard(people, store.completions);
+    return;
+  }
+  throw new Error("Managing people needs rich Supabase or local mode.");
 }
 
 async function addLegacySupabase(input) {
@@ -677,7 +938,7 @@ async function completeRich(chore, proofFile) {
 
 async function assessRich(chore, decision) {
   if (!isAdmin()) {
-    throw new Error("Pick “I am” a parent to assess completions.");
+    throw new Error("Admin mode required to assess completions.");
   }
   if (!chore.completionId) {
     throw new Error("No completion to assess for this task.");
@@ -699,7 +960,7 @@ async function assessRich(chore, decision) {
       body: JSON.stringify({
         assessment_status: decision,
         points_awarded: award,
-        assessed_by_person_id: assessor.id,
+        assessed_by_person_id: assessor?.id ?? null,
         assessed_at: now,
       }),
     },
@@ -943,9 +1204,17 @@ function fillMeSelect() {
   syncComposerAdminUi();
 }
 
+function roleLabel(role) {
+  if (role === "parent") return "Parent (admin)";
+  if (role === "other") return "Other";
+  return "Child";
+}
+
 function renderScoreboard() {
   listEl.innerHTML = "";
   listEl.classList.add("hidden");
+  peoplePanelEl.classList.add("hidden");
+  peoplePanelEl.innerHTML = "";
   scoreboardEl.classList.remove("hidden");
   emptyEl.classList.add("hidden");
   scoreboardEl.innerHTML = "";
@@ -953,10 +1222,10 @@ function renderScoreboard() {
   summaryEl.textContent =
     scoreRows.length === 0
       ? "Add household people to start the scoreboard."
-      : "Points from parent-approved completions.";
+      : "Points from approved completions.";
 
   if (scoreRows.length === 0) {
-    emptyEl.textContent = "No people yet. Add a parent or child below.";
+    emptyEl.textContent = "No people yet. Add someone under People.";
     emptyEl.classList.remove("hidden");
     return;
   }
@@ -970,12 +1239,7 @@ function renderScoreboard() {
     name.textContent = row.displayName;
     const role = document.createElement("p");
     role.className = "score-role";
-    role.textContent =
-      row.role === "parent"
-        ? "Parent (admin)"
-        : row.role === "other"
-          ? "Other"
-          : "Child";
+    role.textContent = roleLabel(row.role);
     left.append(name, role);
     const pts = document.createElement("div");
     pts.className = "score-points";
@@ -986,14 +1250,124 @@ function renderScoreboard() {
   }
 }
 
+function renderPeoplePanel() {
+  listEl.innerHTML = "";
+  listEl.classList.add("hidden");
+  scoreboardEl.classList.add("hidden");
+  scoreboardEl.innerHTML = "";
+  peoplePanelEl.classList.remove("hidden");
+  peoplePanelEl.innerHTML = "";
+  emptyEl.classList.add("hidden");
+  fillMeSelect();
+  summaryEl.textContent =
+    people.length === 0
+      ? "Add household members to assign and score work."
+      : `${people.length} household ${people.length === 1 ? "person" : "people"}.`;
+
+  const addBlock = document.createElement("div");
+  addBlock.className = "people-manage";
+  const addTitle = document.createElement("p");
+  addTitle.className = "field-label";
+  addTitle.textContent = "Add person";
+  const row = document.createElement("div");
+  row.className = "people-add-row";
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.maxLength = 40;
+  nameInput.placeholder = "Name";
+  nameInput.setAttribute("aria-label", "Person name");
+  nameInput.id = "personName";
+  const roleSelect = document.createElement("select");
+  roleSelect.setAttribute("aria-label", "Person role");
+  roleSelect.id = "personRole";
+  for (const [value, label] of [
+    ["child", "Child"],
+    ["parent", "Parent (admin)"],
+    ["other", "Other"],
+  ]) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    roleSelect.append(opt);
+  }
+  const addBtn = document.createElement("button");
+  addBtn.type = "button";
+  addBtn.className = "primary";
+  addBtn.textContent = "Add";
+  addBtn.addEventListener("click", () => {
+    void addHouseholdPerson(nameInput, roleSelect);
+  });
+  row.append(nameInput, roleSelect, addBtn);
+  const hint = document.createElement("p");
+  hint.className = "field-hint";
+  hint.textContent =
+    "Parents are marked for future Auth. This UI is admin mode for now — anyone on the device can manage people.";
+  addBlock.append(addTitle, row, hint);
+  peoplePanelEl.append(addBlock);
+
+  if (people.length === 0) {
+    emptyEl.textContent = "No people yet. Add a parent or child above.";
+    emptyEl.classList.remove("hidden");
+    return;
+  }
+
+  const list = document.createElement("ul");
+  list.className = "people-list";
+  for (const person of people) {
+    const li = document.createElement("li");
+    li.className = "people-row";
+    const left = document.createElement("div");
+    const name = document.createElement("p");
+    name.className = "people-name";
+    name.textContent = person.displayName;
+    left.append(name);
+    const role = document.createElement("select");
+    role.setAttribute("aria-label", `Role for ${person.displayName}`);
+    for (const [value, label] of [
+      ["child", "Child"],
+      ["parent", "Parent (admin)"],
+      ["other", "Other"],
+    ]) {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      if (person.role === value) opt.selected = true;
+      role.append(opt);
+    }
+    role.addEventListener("change", () => {
+      void (async () => {
+        try {
+          await updatePersonRole(person.id, role.value);
+          fillMeSelect();
+          setStatus(`Updated ${person.displayName}.`);
+          writeSwrCache();
+          renderPeoplePanel();
+        } catch (error) {
+          setStatus(error.message);
+          role.value = person.role;
+        }
+      })();
+    });
+    li.append(left, role);
+    list.append(li);
+  }
+  peoplePanelEl.append(list);
+}
+
 function render() {
   if (filter === "scores") {
     renderScoreboard();
     return;
   }
+  if (filter === "people") {
+    renderPeoplePanel();
+    return;
+  }
 
   scoreboardEl.classList.add("hidden");
   scoreboardEl.innerHTML = "";
+  peoplePanelEl.classList.add("hidden");
+  peoplePanelEl.innerHTML = "";
   listEl.classList.remove("hidden");
   listEl.innerHTML = "";
   emptyEl.classList.toggle("hidden", chores.length > 0);
@@ -1104,6 +1478,12 @@ function render() {
     }
 
     body.append(title);
+    if (chore.description) {
+      const desc = document.createElement("p");
+      desc.className = "chore-description";
+      desc.textContent = chore.description;
+      body.append(desc);
+    }
     if (meta.childNodes.length > 0) body.append(meta);
 
     if (Array.isArray(chore.steps) && chore.steps.length > 0) {
@@ -1133,7 +1513,29 @@ function render() {
       body.append(figure);
     }
 
-    if (!done && chore.instanceStatus !== "waiting" && backend !== "api") {
+    if (backend === "supabase-rich" || backend === "local" || backend === "supabase") {
+      const actions = document.createElement("div");
+      actions.className = "chore-actions";
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.className = "text-btn";
+      edit.textContent = "Edit";
+      edit.addEventListener("click", () => {
+        openEditDialog(chore);
+      });
+      actions.append(edit);
+      if (!done && chore.instanceStatus !== "waiting" && backend !== "api") {
+        const claim = document.createElement("button");
+        claim.type = "button";
+        claim.className = "text-btn";
+        claim.textContent = chore.assignee ? "Reclaim" : "I’ll do it";
+        claim.addEventListener("click", () => {
+          void claimChore(chore);
+        });
+        actions.append(claim);
+      }
+      body.append(actions);
+    } else if (!done && chore.instanceStatus !== "waiting") {
       const actions = document.createElement("div");
       actions.className = "chore-actions";
       const claim = document.createElement("button");
@@ -1181,17 +1583,23 @@ function render() {
 
 async function loadChores({ quiet = false } = {}) {
   if (backend === "supabase-rich") {
-    chores = await listRichSupabase(filter);
+    chores = await listRichSupabase(filter === "people" ? "all" : filter);
   } else if (backend === "supabase") {
-    chores = await listLegacySupabase(filter);
+    chores = await listLegacySupabase(filter === "people" ? "all" : filter);
     scoreRows = [];
   } else if (backend === "api") {
-    const data = await api(`api/chores?status=${encodeURIComponent(filter === "scores" ? "all" : filter)}`);
+    const statusParam =
+      filter === "scores" || filter === "people" ? "all" : filter;
+    const data = await api(
+      `api/chores?status=${encodeURIComponent(statusParam)}`,
+    );
     chores = (data.chores ?? []).map((c) => ({ ...c, mode: "legacy" }));
     scoreRows = [];
   } else {
-    chores = listLocal(filter);
+    chores = listLocal(filter === "people" ? "all" : filter);
   }
+  paintedFromCache = false;
+  writeSwrCache();
   render();
   if (!quiet && (backend === "supabase" || backend === "supabase-rich")) {
     setStatus(
@@ -1263,16 +1671,27 @@ async function ensureMePerson() {
   return person;
 }
 
-async function addHouseholdPerson() {
-  const name = personNameInput.value.trim();
+async function addHouseholdPerson(nameEl, roleEl) {
+  const nameInput =
+    nameEl || document.querySelector("#personName");
+  const roleInput =
+    roleEl || document.querySelector("#personRole");
+  const name = nameInput?.value?.trim() || "";
   if (!name) {
     setStatus("Enter a name to add a household person.");
     return;
   }
-  const role = personRoleInput.value || "child";
+  const role = roleInput?.value || "child";
   try {
     if (backend === "supabase-rich") {
-      await findOrCreatePerson(name, role);
+      const existing = people.find(
+        (p) => p.displayName.toLowerCase() === name.toLowerCase(),
+      );
+      if (existing) {
+        await updatePersonRole(existing.id, role);
+      } else {
+        await findOrCreatePerson(name, role);
+      }
     } else if (backend === "local") {
       const store = loadLocalV2();
       const existing = store.people.find(
@@ -1302,14 +1721,187 @@ async function addHouseholdPerson() {
       setStatus("Adding people needs rich Supabase schema or local mode.");
       return;
     }
-    personNameInput.value = "";
+    if (nameInput) nameInput.value = "";
     fillMeSelect();
+    writeSwrCache();
     setStatus(
       role === "parent"
         ? `Added ${name} as parent (admin). Select them under “I am”.`
         : `Added ${name}.`,
     );
-    if (filter === "scores") render();
+    if (filter === "scores" || filter === "people") render();
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
+function openEditDialog(chore) {
+  if (backend === "api") {
+    setStatus("Edit needs Supabase or local mode.");
+    return;
+  }
+  pendingEdit = chore;
+  editTitleInput.value = chore.title || "";
+  editDescriptionInput.value = chore.description || "";
+  editAssigneeInput.value = chore.assignee || "";
+  editKindInput.value = chore.kind || "once";
+  editRecurrenceIntervalInput.value = String(
+    chore.recurrenceInterval || DEFAULT_PERIODIC_INTERVAL,
+  );
+  editRecurrenceUnitInput.value =
+    chore.recurrenceUnit || DEFAULT_PERIODIC_UNIT;
+  editPointsInput.value = String(
+    chore.points ?? DEFAULT_TASK_POINTS,
+  );
+  editDueDateInput.value = chore.dueDate || "";
+  editStepsInput.value = stepsToTextarea(chore.steps);
+  editReferencePhotoInput.value = "";
+  editRefHint.textContent = chore.referencePhotoPath
+    ? "A reference photo is already set — choose a file only to replace it."
+    : "Optional: add a “what good looks like” photo.";
+  syncComposerAdminUi();
+  if (typeof editDialog.showModal === "function") {
+    editDialog.showModal();
+  } else {
+    void saveEditTask(chore, collectEditPayload());
+  }
+}
+
+function collectEditPayload() {
+  const kind = editKindInput.value || "once";
+  const recurrence = resolveRecurrence(
+    kind,
+    Number(editRecurrenceIntervalInput.value) || DEFAULT_PERIODIC_INTERVAL,
+    editRecurrenceUnitInput.value || DEFAULT_PERIODIC_UNIT,
+  );
+  return {
+    title: editTitleInput.value.trim(),
+    description: editDescriptionInput.value.trim() || undefined,
+    assignee: editAssigneeInput.value.trim() || undefined,
+    kind,
+    recurrenceInterval: recurrence.recurrenceInterval,
+    recurrenceUnit: recurrence.recurrenceUnit,
+    points: Math.max(
+      0,
+      Math.floor(Number(editPointsInput.value) || DEFAULT_TASK_POINTS),
+    ),
+    dueDate: editDueDateInput.value || undefined,
+    steps: parseSteps(editStepsInput.value),
+    referenceFile: editReferencePhotoInput.files?.[0] ?? null,
+  };
+}
+
+async function updateLocalTask(chore, input) {
+  const store = loadLocalV2();
+  const index = store.instances.findIndex((i) => i.id === chore.id);
+  if (index < 0) throw new Error("Task not found");
+  const kind = input.kind || "once";
+  const recurrence = resolveRecurrence(
+    kind,
+    input.recurrenceInterval,
+    input.recurrenceUnit,
+  );
+  const points = Math.max(
+    0,
+    Math.floor(Number(input.points ?? DEFAULT_TASK_POINTS)),
+  );
+  const title = input.title.trim();
+  const description = input.description?.trim() || undefined;
+  let person = null;
+  if (input.assignee?.trim()) {
+    person = store.people.find(
+      (p) =>
+        (p.displayName || p.display_name || "").toLowerCase() ===
+        input.assignee.toLowerCase(),
+    );
+    if (!person) {
+      person = {
+        id: newId("person"),
+        displayName: input.assignee.trim(),
+        role: "child",
+        active: true,
+        createdAt: new Date().toISOString(),
+      };
+      store.people.push(person);
+    }
+  }
+  let referencePath =
+    chore.referencePhotoPath ||
+    store.templates.find((t) => t.id === chore.templateId)?.referencePhotoPath;
+  if (input.referenceFile) {
+    referencePath = await fileToDataUrl(input.referenceFile);
+  }
+  if (chore.templateId) {
+    const tIndex = store.templates.findIndex((t) => t.id === chore.templateId);
+    if (tIndex >= 0) {
+      store.templates[tIndex] = {
+        ...store.templates[tIndex],
+        title,
+        description,
+        kind,
+        recurrenceInterval: recurrence.recurrenceInterval,
+        recurrenceUnit: recurrence.recurrenceUnit,
+        cooldownDays: recurrence.cooldownDays,
+        points,
+        steps: input.steps ?? [],
+        referencePhotoPath: referencePath,
+      };
+    }
+  }
+  const current = store.instances[index];
+  const openLike =
+    current.status === "noticed" ||
+    current.status === "open" ||
+    current.status === "assigned";
+  const next = {
+    ...current,
+    title,
+    description,
+    dueDate: input.dueDate,
+  };
+  if (openLike) {
+    if (person) {
+      next.status = "assigned";
+      next.assigneePersonId = person.id;
+      next.assignee = person.displayName;
+      next.assignedAt = new Date().toISOString();
+    } else {
+      next.status = current.status === "noticed" ? "noticed" : "open";
+      delete next.assigneePersonId;
+      delete next.assignee;
+      delete next.assignedAt;
+    }
+  }
+  store.instances[index] = next;
+  saveLocalV2(store);
+}
+
+async function updateLegacyTask(chore, input) {
+  await updateLegacySupabase(chore.id, {
+    title: input.title.trim(),
+    assignee: input.assignee?.trim() || "",
+    dueDate: input.dueDate || "",
+  });
+}
+
+async function saveEditTask(chore, input) {
+  if (!input.title) {
+    setStatus("Title is required.");
+    return;
+  }
+  try {
+    setStatus("Saving changes…");
+    if (backend === "supabase-rich") {
+      await updateRichTask(chore, input);
+    } else if (backend === "local") {
+      await updateLocalTask(chore, input);
+    } else if (backend === "supabase") {
+      await updateLegacyTask(chore, input);
+    } else {
+      throw new Error("Edit needs Supabase or local mode.");
+    }
+    setStatus("Task updated.");
+    await loadChores({ quiet: true });
   } catch (error) {
     setStatus(error.message);
   }
@@ -1353,7 +1945,7 @@ async function claimChore(chore) {
 async function assessChore(chore, decision) {
   try {
     if (!isAdmin()) {
-      throw new Error("Pick “I am” a parent to assess completions.");
+      throw new Error("Admin mode required to assess completions.");
     }
     if (backend === "supabase-rich") {
       await assessRich(chore, decision);
@@ -1373,7 +1965,7 @@ async function assessChore(chore, decision) {
         ...store.completions[index],
         assessmentStatus: decision,
         pointsAwarded: award,
-        assessedByPersonId: assessor.id,
+        assessedByPersonId: assessor?.id,
         assessedAt: new Date().toISOString(),
       };
       saveLocalV2(store);
@@ -1558,8 +2150,20 @@ kindInput.addEventListener("change", () => {
   syncComposerAdminUi();
 });
 
-addPersonBtn.addEventListener("click", () => {
-  void addHouseholdPerson();
+editKindInput.addEventListener("change", () => {
+  syncComposerAdminUi();
+});
+
+editForm.addEventListener("submit", (event) => {
+  const submitter = event.submitter;
+  const value = submitter?.value || "cancel";
+  if (value !== "save" || !pendingEdit) {
+    pendingEdit = null;
+    return;
+  }
+  const chore = pendingEdit;
+  pendingEdit = null;
+  void saveEditTask(chore, collectEditPayload());
 });
 
 filterButtons.forEach((button) => {
@@ -1570,6 +2174,10 @@ filterButtons.forEach((button) => {
       item.classList.toggle("is-active", active);
       item.setAttribute("aria-selected", active ? "true" : "false");
     });
+    // Paint cached list immediately when switching tabs, then revalidate.
+    if (backend === "supabase" || backend === "supabase-rich") {
+      paintFromSwrCache();
+    }
     void loadChores({ quiet: true }).catch((error) => setStatus(error.message));
   });
 });
@@ -1591,14 +2199,16 @@ form.addEventListener("submit", async (event) => {
     );
     const payload = {
       title,
+      description: descriptionInput.value.trim() || undefined,
       assignee: assigneeInput.value.trim() || undefined,
       dueDate: dueDateInput.value || undefined,
       kind,
       recurrenceInterval: recurrence.recurrenceInterval,
       recurrenceUnit: recurrence.recurrenceUnit,
-      points: isAdmin()
-        ? Math.max(0, Math.floor(Number(pointsInput.value) || DEFAULT_TASK_POINTS))
-        : DEFAULT_TASK_POINTS,
+      points: Math.max(
+        0,
+        Math.floor(Number(pointsInput.value) || DEFAULT_TASK_POINTS),
+      ),
       steps: parseSteps(stepsInput.value),
       referenceFile: referencePhotoInput.files?.[0] ?? null,
     };
@@ -1645,6 +2255,7 @@ form.addEventListener("submit", async (event) => {
       store.templates.push({
         id: templateId,
         title: payload.title,
+        description: payload.description,
         kind: payload.kind,
         recurrenceInterval: payload.recurrenceInterval,
         recurrenceUnit: payload.recurrenceUnit,
@@ -1662,6 +2273,7 @@ form.addEventListener("submit", async (event) => {
         id: newId("inst"),
         templateId,
         title: payload.title,
+        description: payload.description,
         status: person ? "assigned" : "open",
         assigneePersonId: person?.id,
         assignee: person?.displayName,
@@ -1678,7 +2290,7 @@ form.addEventListener("submit", async (event) => {
     pointsInput.value = String(DEFAULT_TASK_POINTS);
     syncComposerAdminUi();
     titleInput.focus();
-    if (filter === "done" || filter === "scores") {
+    if (filter === "done" || filter === "scores" || filter === "people") {
       filter = "open";
       filterButtons.forEach((item) => {
         const active = item.dataset.filter === "open";
@@ -1720,19 +2332,33 @@ if ("serviceWorker" in navigator) {
 
 syncComposerAdminUi();
 
+// Instant first paint from cache while backend detection + fetch run.
+paintFromSwrCache();
+
 void (async () => {
   backend = await detectBackend();
   if (backend === "supabase-rich") {
-    setStatus("Connected (rich model). Polling…");
+    setStatus(
+      paintedFromCache
+        ? "Refreshing from Supabase…"
+        : "Connected (rich model). Polling…",
+    );
     startPolling();
   } else if (backend === "supabase") {
-    setStatus("Connected to Supabase (legacy table). Run schema.sql for points/recurrence.");
+    setStatus(
+      "Connected to Supabase (legacy table). Run schema.sql for points/recurrence.",
+    );
     startPolling();
   } else if (backend === "local") {
     setStatus("Saved on this device (no Supabase / API).");
   }
   await loadChores({ quiet: true });
+  if (backend === "supabase" || backend === "supabase-rich") {
+    setStatus("Synced.");
+  }
 })().catch((error) => {
-  summaryEl.textContent = "Could not load chores.";
+  if (!paintedFromCache) {
+    summaryEl.textContent = "Could not load chores.";
+  }
   setStatus(error.message);
 });

@@ -150,9 +150,101 @@ body {
   align-items: center;
 }
 
-.people-add-row input {
-  flex: 1 1 8rem;
+.people-add-row input,
+.people-add-row select {
+  flex: 1 1 7rem;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--paper-strong);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.95rem;
+  padding: 0.55rem 0.75rem;
+}
+
+.people-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  animation: rise 360ms ease-out both;
+}
+
+.people-manage {
+  padding: 1rem 1.05rem;
+  border-radius: var(--radius);
+  background: var(--paper);
+  border: 1px solid var(--line);
+}
+
+.people-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.people-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  border-radius: 16px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+}
+
+.people-name {
+  margin: 0;
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.people-row select {
   min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--paper-strong);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.9rem;
+  padding: 0.35rem 0.55rem;
+}
+
+.chore-description {
+  margin: 0.25rem 0 0;
+  color: var(--ink-soft);
+  font-size: 0.95rem;
+  line-height: 1.35;
+}
+
+.sheet-body input[type="text"],
+.sheet-body input[type="number"],
+.sheet-body input[type="date"],
+.sheet-body select,
+.sheet-body textarea {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.98rem;
+  padding: 0.6rem 0.8rem;
+  margin-bottom: 0.15rem;
+}
+
+.sheet-body textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.sheet-body .recurrence-fields {
+  margin: 0.25rem 0 0.5rem;
 }
 
 .scoreboard {

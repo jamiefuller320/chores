@@ -51,17 +51,22 @@ override those defaults.
 ### Sync
 
 Open tabs poll Supabase about every **10 seconds**, and refresh when you return
-to the tab — so iPhone and iPad stay aligned without localhost.
+to the tab — so iPhone and iPad stay aligned without localhost. The UI also
+keeps a **local cache** of open tasks and scores for a fast first paint, then
+reconciles with Supabase in the background.
 
 ## Product slice (current)
 
+- **Admin UI mode (v1)** — the Pages UI is full parent/admin for now: edit tasks, set points, manage people, assess. “I am …” still picks who claims/completes. **Auth later:** separate logins + parent password-reset (not built yet; anon RLS still allows writes).
+- **Edit any task** — **Edit** on a card updates title, description, steps, points, recurrence, assignee, kind, due date, reference photo.
+- **People** — **People** tab: add name + role (`parent` / `child` / `other`), list and change roles.
+- **Points** — point value is on the add form (not buried) and editable per task; **Scores** tab shows approved totals.
+- **Fast load** — open tasks / scoreboard paint from a localStorage cache first, then revalidate against Supabase (stale-while-revalidate).
 - **Self-assign** — pick “I am …” then **I’ll do it** on an open task (assign-by-name still works).
-- **Template steps** + **reference photo** — “what good looks like” on add (under *Steps & standard photo*).
+- **Template steps** + **reference photo** — “what good looks like” on add/edit.
 - **Proof photo** on complete — optional; retained **~7 days** or until the next completion for that template (whichever first).
 - **Recurrence** — periodic tasks default to **every 4 weeks**; custom every **N days** or **N weeks**. Completing a recurring task schedules the next cycle (`waiting` until due).
-- **Points + scoreboard** — each task has a point value; **Scores** tab shows running totals per person.
-- **Assessment** — completing a task leaves it **pending**; points count only after a **parent** approves (or rejects).
-- **Admin = parent** — only when “I am …” is a person with role **parent** can you set points or assess. v1 has no full Auth; this is a household-device identity gate (anon RLS still allows writes). Add parents under *Household people* in the composer.
+- **Assessment** — completing a task leaves it **pending**; points count only after **approve** (or reject).
 
 ## Backend priority
 

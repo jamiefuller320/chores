@@ -39,8 +39,9 @@
           <select id="me-person" aria-label="Select who you are">
             <option value="">Someone…</option>
           </select>
-          <p id="admin-hint" class="admin-hint hidden" role="status">
-            Parent mode — you can set points and assess completions.
+          <p id="admin-hint" class="admin-hint" role="status">
+            Admin mode — edit tasks, set points, manage people, assess completions.
+            Real logins come later.
           </p>
         </div>
         <div class="filters" role="tablist" aria-label="Chore filters">
@@ -53,6 +54,9 @@
           <button class="filter" data-filter="all" role="tab" aria-selected="false">
             All
           </button>
+          <button class="filter" data-filter="people" role="tab" aria-selected="false">
+            People
+          </button>
           <button class="filter" data-filter="scores" role="tab" aria-selected="false">
             Scores
           </button>
@@ -63,6 +67,7 @@
         <section class="list-panel" aria-labelledby="list-heading">
           <h1 id="list-heading" class="visually-hidden">Household chores</h1>
           <ul id="chore-list" class="chore-list"></ul>
+          <div id="people-panel" class="people-panel hidden" aria-live="polite"></div>
           <div id="scoreboard" class="scoreboard hidden" aria-live="polite"></div>
           <p id="empty-state" class="empty-state hidden">
             Nothing here yet. Add the next household task below.
@@ -122,8 +127,8 @@
           </select>
           <p class="field-hint">Default for repeats is every 4 weeks.</p>
         </div>
-        <div id="points-fields" class="points-fields hidden">
-          <label class="field-label" for="points">Points (parent)</label>
+        <div id="points-fields" class="points-fields">
+          <label class="field-label" for="points">Points</label>
           <input
             id="points"
             name="points"
@@ -133,9 +138,18 @@
             value="1"
             aria-label="Task point value"
           />
+          <p class="field-hint">Reward value when a completion is approved.</p>
         </div>
         <details class="composer-more">
-          <summary>Steps, standard photo &amp; people</summary>
+          <summary>Description, steps &amp; standard photo</summary>
+          <label class="field-label" for="description">Description</label>
+          <textarea
+            id="description"
+            name="description"
+            rows="2"
+            maxlength="1000"
+            placeholder="Optional details"
+          ></textarea>
           <label class="field-label" for="steps">Steps (one per line)</label>
           <textarea
             id="steps"
@@ -153,28 +167,6 @@
             capture="environment"
             aria-label="Reference photo"
           />
-          <div class="people-add">
-            <p class="field-label">Household people</p>
-            <div class="people-add-row">
-              <input
-                id="personName"
-                type="text"
-                maxlength="40"
-                placeholder="Name"
-                aria-label="Person name"
-              />
-              <select id="personRole" aria-label="Person role">
-                <option value="child">Child</option>
-                <option value="parent">Parent (admin)</option>
-                <option value="other">Other</option>
-              </select>
-              <button type="button" id="add-person" class="ghost">Add</button>
-            </div>
-            <p class="field-hint">
-              Parents are admins: only they set points and assess completions
-              (pick them under “I am”).
-            </p>
-          </div>
         </details>
         <p id="form-status" class="form-status" role="status" aria-live="polite"></p>
       </form>
@@ -193,13 +185,66 @@
           capture="environment"
         />
         <p class="field-hint">
-          Points are pending until a parent assesses this completion.
+          Points are pending until an admin assesses this completion.
         </p>
         <div class="sheet-actions">
           <button type="submit" value="cancel" class="ghost">Cancel</button>
           <button type="submit" value="confirm" class="primary" id="complete-confirm">
             Done
           </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="edit-dialog" class="sheet">
+      <form method="dialog" id="edit-form" class="sheet-body">
+        <h2 class="sheet-title">Edit task</h2>
+        <p class="sheet-subtitle">Change anything about this chore.</p>
+        <label class="field-label" for="edit-title">Title</label>
+        <input id="edit-title" name="title" type="text" required maxlength="120" />
+        <label class="field-label" for="edit-description">Description</label>
+        <textarea id="edit-description" name="description" rows="2" maxlength="1000"></textarea>
+        <label class="field-label" for="edit-assignee">Assignee</label>
+        <input id="edit-assignee" name="assignee" type="text" maxlength="40" placeholder="Name or blank" />
+        <label class="field-label" for="edit-kind">Kind</label>
+        <select id="edit-kind" name="kind">
+          <option value="once">Once</option>
+          <option value="daily">Daily</option>
+          <option value="periodic">Repeats</option>
+        </select>
+        <div id="edit-recurrence-fields" class="recurrence-fields hidden">
+          <label class="field-label" for="edit-recurrenceInterval">Every</label>
+          <input
+            id="edit-recurrenceInterval"
+            name="recurrenceInterval"
+            type="number"
+            min="1"
+            max="365"
+            value="4"
+          />
+          <select id="edit-recurrenceUnit" name="recurrenceUnit">
+            <option value="week">weeks</option>
+            <option value="day">days</option>
+          </select>
+        </div>
+        <label class="field-label" for="edit-points">Points</label>
+        <input id="edit-points" name="points" type="number" min="0" max="999" value="1" />
+        <label class="field-label" for="edit-dueDate">Due date</label>
+        <input id="edit-dueDate" name="dueDate" type="date" />
+        <label class="field-label" for="edit-steps">Steps (one per line)</label>
+        <textarea id="edit-steps" name="steps" rows="3" maxlength="2000"></textarea>
+        <label class="field-label" for="edit-referencePhoto">Replace reference photo</label>
+        <input
+          id="edit-referencePhoto"
+          name="referencePhoto"
+          type="file"
+          accept="image/*"
+          capture="environment"
+        />
+        <p id="edit-ref-hint" class="field-hint"></p>
+        <div class="sheet-actions">
+          <button type="submit" value="cancel" class="ghost">Cancel</button>
+          <button type="submit" value="save" class="primary">Save</button>
         </div>
       </form>
     </dialog>

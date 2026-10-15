@@ -3,6 +3,9 @@ const scoreboardEl = document.querySelector("#scoreboard");
 const peoplePanelEl = document.querySelector("#people-panel");
 const emptyEl = document.querySelector("#empty-state");
 const summaryEl = document.querySelector("#summary");
+const composerDock = document.querySelector("#composer-dock");
+const newTaskToggle = document.querySelector("#new-task-toggle");
+const composerCloseBtn = document.querySelector("#composer-close");
 const form = document.querySelector("#add-form");
 const formStatus = document.querySelector("#form-status");
 const titleInput = document.querySelector("#title");
@@ -20,6 +23,11 @@ const referencePhotoInput = document.querySelector("#referencePhoto");
 const meSelect = document.querySelector("#me-person");
 const adminHint = document.querySelector("#admin-hint");
 const filterButtons = [...document.querySelectorAll(".filter")];
+const taskDialog = document.querySelector("#task-dialog");
+const taskCardTitle = document.querySelector("#task-card-title");
+const taskCardBody = document.querySelector("#task-card-body");
+const taskCardActions = document.querySelector("#task-card-actions");
+const taskCardClose = document.querySelector("#task-card-close");
 const completeDialog = document.querySelector("#complete-dialog");
 const completeForm = document.querySelector("#complete-form");
 const completeTitleEl = document.querySelector("#complete-title");
@@ -102,8 +110,12 @@ let pollTimer = null;
 let pendingComplete = null;
 /** @type {Record<string, unknown> | null} */
 let pendingEdit = null;
+/** @type {Record<string, unknown> | null} */
+let pendingTaskCard = null;
 /** @type {boolean} */
 let paintedFromCache = false;
+/** @type {boolean} */
+let composerOpen = false;
 /** @type {MediaStream | null} */
 let proofStream = null;
 /** @type {MediaStream | null} */
@@ -1639,8 +1651,7 @@ function render() {
   listEl.classList.remove("hidden");
   listEl.innerHTML = "";
   emptyEl.classList.toggle("hidden", chores.length > 0);
-  emptyEl.textContent =
-    "Nothing here yet. Add the next household task below.";
+  emptyEl.textContent = "Nothing here yet. Tap New task to add one.";
   fillMeSelect();
 
   const openCount = chores.filter(
@@ -1670,160 +1681,219 @@ function render() {
     li.className = `chore${done ? " is-done" : ""}`;
     li.dataset.id = chore.id;
 
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "check";
-    button.setAttribute("aria-pressed", done ? "true" : "false");
-    button.setAttribute(
+    const titleBtn = document.createElement("button");
+    titleBtn.type = "button";
+    titleBtn.className = "chore-title-btn";
+    titleBtn.setAttribute(
       "aria-label",
-      done ? `Mark ${chore.title} as open` : `Mark ${chore.title} as done`,
+      `Open ${chore.title}`,
     );
-    button.innerHTML = checkIcon;
-    button.addEventListener("click", () => {
-      void onCheckClick(chore);
-    });
-
-    const body = document.createElement("div");
-    body.className = "chore-body";
-    const title = document.createElement("p");
+    const title = document.createElement("span");
     title.className = "chore-title";
     title.textContent = chore.title;
+    const chevron = document.createElement("span");
+    chevron.className = "chore-title-chevron";
+    chevron.setAttribute("aria-hidden", "true");
+    chevron.textContent = "›";
+    titleBtn.append(title, chevron);
+    titleBtn.addEventListener("click", () => {
+      openTaskCard(chore);
+    });
 
-    const meta = document.createElement("div");
-    meta.className = "chore-meta";
-    if (chore.assignee) {
-      const assignee = document.createElement("span");
-      assignee.className = "meta-pill";
-      assignee.textContent = chore.assignee;
-      meta.append(assignee);
-    }
-    const recur = formatRecurrenceLabel(
-      chore.kind,
-      chore.recurrenceInterval,
-      chore.recurrenceUnit,
-    );
-    if (recur) {
-      const kind = document.createElement("span");
-      kind.className = "meta-pill";
-      kind.textContent = recur;
-      meta.append(kind);
-    }
-    if (chore.points !== undefined && chore.mode === "instance") {
-      const pts = document.createElement("span");
-      pts.className = "meta-pill";
-      pts.textContent = `${chore.points} pt${chore.points === 1 ? "" : "s"}`;
-      meta.append(pts);
-    }
-    if (chore.instanceStatus === "waiting") {
-      const waiting = document.createElement("span");
-      waiting.className = "meta-pill";
-      const when = formatDue(chore.dueAt);
-      waiting.textContent = when ? `Resting until ${when}` : "Resting";
-      meta.append(waiting);
-    }
-    if (done && chore.assessmentStatus === "pending") {
-      const pending = document.createElement("span");
-      pending.className = "meta-pill is-pending";
-      pending.textContent = "Pending assessment";
-      meta.append(pending);
-    } else if (done && chore.assessmentStatus === "approved") {
-      const ok = document.createElement("span");
-      ok.className = "meta-pill is-approved";
-      ok.textContent = "Approved";
-      meta.append(ok);
-    } else if (done && chore.assessmentStatus === "rejected") {
-      const no = document.createElement("span");
-      no.className = "meta-pill is-pending";
-      no.textContent = "Not approved";
-      meta.append(no);
-    }
-    const dueLabel = formatDue(chore.dueDate || chore.dueAt);
-    if (dueLabel && chore.instanceStatus !== "waiting") {
-      const due = document.createElement("span");
-      due.className = "meta-pill";
-      due.textContent = `Due ${dueLabel}`;
-      meta.append(due);
-    }
-
-    body.append(title);
-    if (chore.description) {
-      const desc = document.createElement("p");
-      desc.className = "chore-description";
-      desc.textContent = chore.description;
-      body.append(desc);
-    }
-    if (meta.childNodes.length > 0) body.append(meta);
-
-    if (Array.isArray(chore.steps) && chore.steps.length > 0) {
-      const ol = document.createElement("ol");
-      ol.className = "chore-steps";
-      for (const step of [...chore.steps].sort(
-        (a, b) => (a.ordinal ?? 0) - (b.ordinal ?? 0),
-      )) {
-        const liStep = document.createElement("li");
-        liStep.textContent = step.text;
-        ol.append(liStep);
-      }
-      body.append(ol);
-    }
-
-    if (chore.referencePhotoPath) {
-      const figure = document.createElement("figure");
-      figure.className = "chore-ref";
-      const img = document.createElement("img");
-      img.src =
-        storagePublicUrl(chore.referencePhotoPath) || chore.referencePhotoPath;
-      img.alt = "What good looks like";
-      img.loading = "lazy";
-      const caption = document.createElement("figcaption");
-      caption.textContent = "What good looks like";
-      figure.append(img, caption);
-      body.append(figure);
-    }
-
-    if (backend === "supabase-rich" || backend === "local" || backend === "supabase") {
-      const actions = document.createElement("div");
-      actions.className = "chore-actions";
-      const edit = document.createElement("button");
-      edit.type = "button";
-      edit.className = "text-btn";
-      edit.textContent = "Edit";
-      edit.addEventListener("click", () => {
-        openEditDialog(chore);
-      });
-      actions.append(edit);
-      body.append(actions);
-    }
-
-    if (
-      done &&
-      chore.assessmentStatus === "pending" &&
-      chore.completionId &&
-      isAdmin() &&
-      (backend === "supabase-rich" || backend === "local")
-    ) {
-      const assess = document.createElement("div");
-      assess.className = "assess-actions";
-      const approve = document.createElement("button");
-      approve.type = "button";
-      approve.className = "text-btn";
-      approve.textContent = `Approve (+${chore.points ?? DEFAULT_TASK_POINTS} pts)`;
-      approve.addEventListener("click", () => {
-        void assessChore(chore, "approved");
-      });
-      const reject = document.createElement("button");
-      reject.type = "button";
-      reject.className = "text-btn is-reject";
-      reject.textContent = "Reject";
-      reject.addEventListener("click", () => {
-        void assessChore(chore, "rejected");
-      });
-      assess.append(approve, reject);
-      body.append(assess);
-    }
-
-    li.append(button, body);
+    li.append(titleBtn);
     listEl.append(li);
+  }
+}
+
+function buildTaskMeta(chore) {
+  const meta = document.createElement("div");
+  meta.className = "chore-meta";
+  const done =
+    chore.status === "done" || chore.instanceStatus === "done";
+  if (chore.assignee) {
+    const assignee = document.createElement("span");
+    assignee.className = "meta-pill";
+    assignee.textContent = chore.assignee;
+    meta.append(assignee);
+  }
+  const recur = formatRecurrenceLabel(
+    chore.kind,
+    chore.recurrenceInterval,
+    chore.recurrenceUnit,
+  );
+  if (recur) {
+    const kind = document.createElement("span");
+    kind.className = "meta-pill";
+    kind.textContent = recur;
+    meta.append(kind);
+  }
+  if (chore.points !== undefined && chore.mode === "instance") {
+    const pts = document.createElement("span");
+    pts.className = "meta-pill";
+    pts.textContent = `${chore.points} pt${chore.points === 1 ? "" : "s"}`;
+    meta.append(pts);
+  }
+  if (chore.instanceStatus === "waiting") {
+    const waiting = document.createElement("span");
+    waiting.className = "meta-pill";
+    const when = formatDue(chore.dueAt);
+    waiting.textContent = when ? `Resting until ${when}` : "Resting";
+    meta.append(waiting);
+  }
+  if (done && chore.assessmentStatus === "pending") {
+    const pending = document.createElement("span");
+    pending.className = "meta-pill is-pending";
+    pending.textContent = "Pending assessment";
+    meta.append(pending);
+  } else if (done && chore.assessmentStatus === "approved") {
+    const ok = document.createElement("span");
+    ok.className = "meta-pill is-approved";
+    ok.textContent = "Approved";
+    meta.append(ok);
+  } else if (done && chore.assessmentStatus === "rejected") {
+    const no = document.createElement("span");
+    no.className = "meta-pill is-pending";
+    no.textContent = "Not approved";
+    meta.append(no);
+  }
+  const dueLabel = formatDue(chore.dueDate || chore.dueAt);
+  if (dueLabel && chore.instanceStatus !== "waiting") {
+    const due = document.createElement("span");
+    due.className = "meta-pill";
+    due.textContent = `Due ${dueLabel}`;
+    meta.append(due);
+  }
+  return meta;
+}
+
+function openTaskCard(chore) {
+  pendingTaskCard = chore;
+  const done =
+    chore.status === "done" || chore.instanceStatus === "done";
+  taskCardTitle.textContent = chore.title;
+  taskCardBody.innerHTML = "";
+  taskCardActions.innerHTML = "";
+
+  const meta = buildTaskMeta(chore);
+  if (meta.childNodes.length > 0) taskCardBody.append(meta);
+
+  if (chore.description) {
+    const desc = document.createElement("p");
+    desc.className = "chore-description";
+    desc.textContent = chore.description;
+    taskCardBody.append(desc);
+  }
+
+  if (Array.isArray(chore.steps) && chore.steps.length > 0) {
+    const ol = document.createElement("ol");
+    ol.className = "chore-steps";
+    for (const step of [...chore.steps].sort(
+      (a, b) => (a.ordinal ?? 0) - (b.ordinal ?? 0),
+    )) {
+      const liStep = document.createElement("li");
+      liStep.textContent = step.text;
+      ol.append(liStep);
+    }
+    taskCardBody.append(ol);
+  }
+
+  if (chore.referencePhotoPath) {
+    const figure = document.createElement("figure");
+    figure.className = "chore-ref";
+    const img = document.createElement("img");
+    img.src =
+      storagePublicUrl(chore.referencePhotoPath) || chore.referencePhotoPath;
+    img.alt = "What good looks like";
+    img.loading = "lazy";
+    const caption = document.createElement("figcaption");
+    caption.textContent = "What good looks like";
+    figure.append(img, caption);
+    taskCardBody.append(figure);
+  }
+
+  if (!done && chore.instanceStatus !== "waiting") {
+    const markDone = document.createElement("button");
+    markDone.type = "button";
+    markDone.className = "primary";
+    markDone.textContent = "Mark done";
+    markDone.addEventListener("click", () => {
+      closeTaskCard();
+      onCheckClick(chore);
+    });
+    taskCardActions.append(markDone);
+  } else if (done) {
+    const reopen = document.createElement("button");
+    reopen.type = "button";
+    reopen.className = "ghost";
+    reopen.textContent = "Reopen";
+    reopen.addEventListener("click", () => {
+      closeTaskCard();
+      void reopenChore(chore);
+    });
+    taskCardActions.append(reopen);
+  }
+
+  if (backend === "supabase-rich" || backend === "local" || backend === "supabase") {
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "ghost";
+    edit.textContent = "Edit";
+    edit.addEventListener("click", () => {
+      closeTaskCard();
+      openEditDialog(chore);
+    });
+    taskCardActions.append(edit);
+  }
+
+  if (
+    done &&
+    chore.assessmentStatus === "pending" &&
+    chore.completionId &&
+    isAdmin() &&
+    (backend === "supabase-rich" || backend === "local")
+  ) {
+    const approve = document.createElement("button");
+    approve.type = "button";
+    approve.className = "primary";
+    approve.textContent = `Approve (+${chore.points ?? DEFAULT_TASK_POINTS} pts)`;
+    approve.addEventListener("click", () => {
+      closeTaskCard();
+      void assessChore(chore, "approved");
+    });
+    const reject = document.createElement("button");
+    reject.type = "button";
+    reject.className = "ghost";
+    reject.textContent = "Reject";
+    reject.addEventListener("click", () => {
+      closeTaskCard();
+      void assessChore(chore, "rejected");
+    });
+    taskCardActions.append(approve, reject);
+  }
+
+  if (typeof taskDialog.showModal === "function") {
+    taskDialog.showModal();
+  }
+}
+
+function closeTaskCard() {
+  pendingTaskCard = null;
+  if (taskDialog?.open) taskDialog.close();
+}
+
+function setComposerOpen(open) {
+  composerOpen = Boolean(open);
+  composerDock?.classList.toggle("is-open", composerOpen);
+  if (form) {
+    form.hidden = !composerOpen;
+    form.classList.toggle("is-collapsed", !composerOpen);
+  }
+  if (newTaskToggle) {
+    newTaskToggle.setAttribute("aria-expanded", composerOpen ? "true" : "false");
+    newTaskToggle.classList.toggle("hidden", composerOpen);
+  }
+  if (composerOpen) {
+    titleInput?.focus();
   }
 }
 
@@ -2605,6 +2675,22 @@ function startPolling() {
   }, ms);
 }
 
+newTaskToggle?.addEventListener("click", () => {
+  setComposerOpen(true);
+});
+
+composerCloseBtn?.addEventListener("click", () => {
+  setComposerOpen(false);
+});
+
+taskCardClose?.addEventListener("click", () => {
+  closeTaskCard();
+});
+
+taskDialog?.addEventListener("close", () => {
+  pendingTaskCard = null;
+});
+
 meSelect.addEventListener("change", () => {
   localStorage.setItem(ME_KEY, meSelect.value);
   syncComposerAdminUi();
@@ -2754,7 +2840,7 @@ form.addEventListener("submit", async (event) => {
     recurrenceUnitInput.value = DEFAULT_PERIODIC_UNIT;
     pointsInput.value = String(DEFAULT_TASK_POINTS);
     syncComposerAdminUi();
-    titleInput.focus();
+    setComposerOpen(false);
     if (filter === "done" || filter === "scores" || filter === "people") {
       filter = "open";
       filterButtons.forEach((item) => {
@@ -2796,6 +2882,7 @@ if ("serviceWorker" in navigator) {
 }
 
 syncComposerAdminUi();
+setComposerOpen(false);
 
 // Instant first paint from cache while backend detection + fetch run.
 paintFromSwrCache();

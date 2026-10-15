@@ -58,7 +58,8 @@ reconciles with Supabase in the background.
 ## Product slice (current)
 
 - **Admin UI mode (v1)** — the Pages UI is full parent/admin for now: edit tasks, set points, manage people, assess. “I am …” still picks who claims/completes. **Auth later:** separate logins + parent password-reset (not built yet; anon RLS still allows writes).
-- **Edit any task** — **Edit** on a card updates title, description, steps, points, recurrence, assignee, kind, due date, reference photo.
+- **List layout** — open list shows **titles only** (scrollable); tap a title for the full task card (details, Edit, Mark done). **New task** is a single collapsed button until opened.
+- **Edit any task** — **Edit** on a task card updates title, description, steps, points, recurrence, assignee, kind, due date, reference photo.
 - **People** — **People** tab: add name + role (`parent` / `child` / `other`), list and change roles.
 - **Points** — point value is on the add form (not buried) and editable per task; **Scores** tab shows approved totals.
 - **Fast load** — open tasks / scoreboard paint from a localStorage cache first, then revalidate against Supabase (stale-while-revalidate).

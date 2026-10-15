@@ -40,8 +40,7 @@
             <option value="">Someone…</option>
           </select>
           <p id="admin-hint" class="admin-hint" role="status">
-            Admin mode — edit tasks, set points, manage people, assess completions.
-            Real logins come later.
+            Admin mode — edit, points, people, assess. Logins later.
           </p>
         </div>
         <div class="filters" role="tablist" aria-label="Chore filters">
@@ -70,113 +69,141 @@
           <div id="people-panel" class="people-panel hidden" aria-live="polite"></div>
           <div id="scoreboard" class="scoreboard hidden" aria-live="polite"></div>
           <p id="empty-state" class="empty-state hidden">
-            Nothing here yet. Add the next household task below.
+            Nothing here yet. Tap New task to add one.
           </p>
         </section>
       </main>
 
-      <form id="add-form" class="composer" autocomplete="off">
-        <label class="composer-label" for="title">New chore</label>
-        <div class="composer-row">
-          <input
-            id="title"
-            name="title"
-            type="text"
-            enterkeyhint="done"
-            placeholder="What needs doing?"
-            required
-            maxlength="120"
-          />
-          <button type="submit" class="primary">Add</button>
-        </div>
-        <div class="composer-meta">
-          <input
-            id="assignee"
-            name="assignee"
-            type="text"
-            placeholder="Assign to… (optional)"
-            maxlength="40"
-            aria-label="Assignee"
-          />
-          <select id="kind" name="kind" aria-label="Repeat kind">
-            <option value="once">Once</option>
-            <option value="daily">Daily</option>
-            <option value="periodic">Repeats</option>
-          </select>
-          <input
-            id="dueDate"
-            name="dueDate"
-            type="date"
-            aria-label="Due date"
-          />
-        </div>
-        <div id="recurrence-fields" class="recurrence-fields hidden">
-          <label class="field-label" for="recurrenceInterval">Every</label>
-          <input
-            id="recurrenceInterval"
-            name="recurrenceInterval"
-            type="number"
-            min="1"
-            max="365"
-            value="4"
-            aria-label="Recurrence interval"
-          />
-          <select id="recurrenceUnit" name="recurrenceUnit" aria-label="Recurrence unit">
-            <option value="week" selected>weeks</option>
-            <option value="day">days</option>
-          </select>
-          <p class="field-hint">Default for repeats is every 4 weeks.</p>
-        </div>
-        <div id="points-fields" class="points-fields">
-          <label class="field-label" for="points">Points</label>
-          <input
-            id="points"
-            name="points"
-            type="number"
-            min="0"
-            max="999"
-            value="1"
-            aria-label="Task point value"
-          />
-          <p class="field-hint">Reward value when a completion is approved.</p>
-        </div>
-        <details class="composer-more">
-          <summary>Description, steps &amp; standard photo</summary>
-          <label class="field-label" for="description">Description</label>
-          <textarea
-            id="description"
-            name="description"
-            rows="2"
-            maxlength="1000"
-            placeholder="Optional details"
-          ></textarea>
-          <label class="field-label" for="steps">Steps (one per line)</label>
-          <textarea
-            id="steps"
-            name="steps"
-            rows="3"
-            maxlength="2000"
-            placeholder="Clear surface&#10;Wipe with cloth&#10;Put items back"
-          ></textarea>
-          <label class="field-label" for="referencePhoto">What good looks like</label>
-          <div class="ref-photo-row">
-            <button type="button" id="reference-open-camera" class="ghost">
-              Open camera
+      <div id="composer-dock" class="composer-dock">
+        <button
+          type="button"
+          id="new-task-toggle"
+          class="new-task-toggle primary"
+          aria-expanded="false"
+          aria-controls="add-form"
+        >
+          New task
+        </button>
+        <form id="add-form" class="composer is-collapsed" autocomplete="off" hidden>
+          <div class="composer-head">
+            <p class="composer-heading">New task</p>
+            <button type="button" id="composer-close" class="ghost composer-close">
+              Close
             </button>
+          </div>
+          <label class="composer-label" for="title">New chore</label>
+          <div class="composer-row">
             <input
-              id="referencePhoto"
-              name="referencePhoto"
-              type="file"
-              accept="image/*"
-              capture="environment"
-              aria-label="Reference photo"
+              id="title"
+              name="title"
+              type="text"
+              enterkeyhint="done"
+              placeholder="What needs doing?"
+              required
+              maxlength="120"
+            />
+            <button type="submit" class="primary">Add</button>
+          </div>
+          <div class="composer-meta">
+            <input
+              id="assignee"
+              name="assignee"
+              type="text"
+              placeholder="Assign to… (optional)"
+              maxlength="40"
+              aria-label="Assignee"
+            />
+            <select id="kind" name="kind" aria-label="Repeat kind">
+              <option value="once">Once</option>
+              <option value="daily">Daily</option>
+              <option value="periodic">Repeats</option>
+            </select>
+            <input
+              id="dueDate"
+              name="dueDate"
+              type="date"
+              aria-label="Due date"
             />
           </div>
-          <p id="reference-camera-status" class="field-hint"></p>
-        </details>
-        <p id="form-status" class="form-status" role="status" aria-live="polite"></p>
-      </form>
+          <div id="recurrence-fields" class="recurrence-fields hidden">
+            <label class="field-label" for="recurrenceInterval">Every</label>
+            <input
+              id="recurrenceInterval"
+              name="recurrenceInterval"
+              type="number"
+              min="1"
+              max="365"
+              value="4"
+              aria-label="Recurrence interval"
+            />
+            <select id="recurrenceUnit" name="recurrenceUnit" aria-label="Recurrence unit">
+              <option value="week" selected>weeks</option>
+              <option value="day">days</option>
+            </select>
+            <p class="field-hint">Default for repeats is every 4 weeks.</p>
+          </div>
+          <div id="points-fields" class="points-fields">
+            <label class="field-label" for="points">Points</label>
+            <input
+              id="points"
+              name="points"
+              type="number"
+              min="0"
+              max="999"
+              value="1"
+              aria-label="Task point value"
+            />
+            <p class="field-hint">Reward value when a completion is approved.</p>
+          </div>
+          <details class="composer-more">
+            <summary>Description, steps &amp; standard photo</summary>
+            <label class="field-label" for="description">Description</label>
+            <textarea
+              id="description"
+              name="description"
+              rows="2"
+              maxlength="1000"
+              placeholder="Optional details"
+            ></textarea>
+            <label class="field-label" for="steps">Steps (one per line)</label>
+            <textarea
+              id="steps"
+              name="steps"
+              rows="3"
+              maxlength="2000"
+              placeholder="Clear surface&#10;Wipe with cloth&#10;Put items back"
+            ></textarea>
+            <label class="field-label" for="referencePhoto">What good looks like</label>
+            <div class="ref-photo-row">
+              <button type="button" id="reference-open-camera" class="ghost">
+                Open camera
+              </button>
+              <input
+                id="referencePhoto"
+                name="referencePhoto"
+                type="file"
+                accept="image/*"
+                capture="environment"
+                aria-label="Reference photo"
+              />
+            </div>
+            <p id="reference-camera-status" class="field-hint"></p>
+          </details>
+          <p id="form-status" class="form-status" role="status" aria-live="polite"></p>
+        </form>
+      </div>
     </div>
+
+    <dialog id="task-dialog" class="sheet task-sheet">
+      <div class="sheet-body" id="task-card">
+        <div class="task-card-head">
+          <h2 class="sheet-title" id="task-card-title">Task</h2>
+          <button type="button" id="task-card-close" class="ghost">Close</button>
+        </div>
+        <div id="task-card-body"></div>
+        <div id="task-card-actions" class="task-card-actions"></div>
+      </div>
+    </dialog>
 
     <dialog id="complete-dialog" class="sheet">
       <form method="dialog" id="complete-form" class="sheet-body">

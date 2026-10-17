@@ -28,6 +28,7 @@ export {
   listOpenInstances,
   noticeTask,
   promoteDueWaiting,
+  releaseExpiredClaims,
   resolveRecurrence,
   scoreboard,
   selfAssign,

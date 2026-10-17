@@ -10,7 +10,8 @@
 --
 -- Safe to re-run. Keeps legacy `public.chores` and adds people / templates /
 -- instances / completion_events for the richer chore model.
--- This slice also adds: template recurrence + points; completion assessment.
+-- This slice also adds: template recurrence + points; completion assessment;
+-- task_instances.complete_by (assignee hold until that time, then release).
 
 -- ---------------------------------------------------------------------------
 -- Legacy flat board (Pages fallback + older clients)
@@ -214,6 +215,10 @@ create table if not exists public.task_instances (
   completed_at timestamptz,
   due_at timestamptz,
   due_date date,
+  -- Assignee holds the task only until this instant. After complete_by, the
+  -- Pages client clears the assignee and returns status to open (anyone may
+  -- mark it done). Null means no timed hold.
+  complete_by timestamptz,
   source text not null default 'manual'
     check (source in ('notice', 'schedule', 'manual', 'split')),
   created_at timestamptz not null default now()
@@ -227,6 +232,13 @@ create index if not exists task_instances_assignee_person_idx
   on public.task_instances (assignee_person_id);
 create index if not exists task_instances_template_idx
   on public.task_instances (template_id);
+
+-- Additive when task_instances already existed without the hold column.
+alter table public.task_instances add column if not exists complete_by timestamptz;
+
+create index if not exists task_instances_complete_by_idx
+  on public.task_instances (complete_by)
+  where complete_by is not null and status = 'assigned';
 
 alter table public.task_instances enable row level security;
 

@@ -23,14 +23,16 @@ This creates / updates:
 | `public.chores` | Legacy flat board (kept for compatibility) |
 | `public.people` | Household members (`parent` = **admin**, `child`, `other`) |
 | `public.task_templates` | Kinds + **recurrence** (default periodic **4 weeks**) + **points** + steps + reference photo |
-| `public.task_instances` | Open / assigned / done / waiting work (self-assign lives here) |
+| `public.task_instances` | Open / assigned / done / waiting work. `complete_by` holds an assignee until that time, then the task is released |
 | `public.completion_events` | Completions + proof photo TTL + **assessment** / **points_awarded** |
 | Storage bucket `chore-photos` | Reference (durable) + proof (TTL) images |
 
 **Re-run this SQL on School Compass** whenever schema columns change (safe to
-re-run). New columns in this slice: `recurrence_interval`, `recurrence_unit`,
-`points` on templates; `assessment_status`, `points_awarded`,
-`assessed_by_person_id`, `assessed_at` on completion events.
+re-run). Latest additive column: `task_instances.complete_by` (timestamptz) —
+the assignee holds the task only until that time. Also present from earlier
+slices: `recurrence_interval`, `recurrence_unit`, `points` on templates;
+`assessment_status`, `points_awarded`, `assessed_by_person_id`,
+`assessed_at` on completion events.
 
 If the Storage bucket insert fails on your plan, create a **public** bucket named
 `chore-photos` in **Storage → New bucket** (5 MB, image MIME types).
@@ -59,7 +61,8 @@ reconciles with Supabase in the background.
 
 - **Admin UI mode (v1)** — the Pages UI is full parent/admin for now: edit tasks, set points, manage people, assess. “I am …” still picks who claims/completes. **Auth later:** separate logins + parent password-reset (not built yet; anon RLS still allows writes).
 - **List layout** — open list shows **titles only** (scrollable); tap a title for the full task card (details, Edit, Mark done). **New task** is a single collapsed button until opened.
-- **Edit any task** — **Edit** on a task card updates title, description, steps, points, recurrence, assignee, kind, due date, reference photo.
+- **Assign with a complete-by time** — naming an assignee (New task or Edit) requires a complete-by date and time. Until then the task stays assigned to that person. After that time, if it is still not done, the app clears the assignee on load and when the page renders, and anyone can mark it done with the name picker.
+- **Edit any task** — **Edit** on a task card updates title, description, steps, points, recurrence, assignee, complete-by, kind, due date, reference photo.
 - **People** — **People** tab: add name + role (`parent` / `child` / `other`), list and change roles.
 - **Points** — point value is on the add form (not buried) and editable per task; **Scores** tab shows approved totals.
 - **Fast load** — open tasks / scoreboard paint from a localStorage cache first, then revalidate against Supabase (stale-while-revalidate).

@@ -164,6 +164,7 @@ function rowToInstance(row: Record<string, unknown>): TaskInstance {
     ...(row.completed_at ? { completedAt: String(row.completed_at) } : {}),
     ...(row.due_at ? { dueAt: String(row.due_at) } : {}),
     ...(row.due_date ? { dueDate: String(row.due_date) } : {}),
+    ...(row.complete_by ? { completeBy: String(row.complete_by) } : {}),
     source: (row.source as TaskInstance["source"]) ?? "manual",
     createdAt: String(row.created_at),
   };

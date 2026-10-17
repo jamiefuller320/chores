@@ -125,6 +125,18 @@
               aria-label="Due date"
             />
           </div>
+          <div id="complete-by-fields" class="complete-by-fields hidden">
+            <label class="field-label" for="completeBy">Complete by</label>
+            <input
+              id="completeBy"
+              name="completeBy"
+              type="datetime-local"
+              aria-label="Complete by"
+            />
+            <p class="field-hint">
+              After this time, if it isn’t done, the task opens for anyone.
+            </p>
+          </div>
           <div id="recurrence-fields" class="recurrence-fields hidden">
             <label class="field-label" for="recurrenceInterval">Every</label>
             <input
@@ -294,6 +306,18 @@
         <textarea id="edit-description" name="description" rows="2" maxlength="1000"></textarea>
         <label class="field-label" for="edit-assignee">Assignee</label>
         <input id="edit-assignee" name="assignee" type="text" maxlength="40" placeholder="Name or blank" />
+        <div id="edit-complete-by-fields" class="complete-by-fields hidden">
+          <label class="field-label" for="edit-completeBy">Complete by</label>
+          <input
+            id="edit-completeBy"
+            name="completeBy"
+            type="datetime-local"
+            aria-label="Complete by"
+          />
+          <p class="field-hint">
+            After this time, if it isn’t done, anyone can mark it done.
+          </p>
+        </div>
         <label class="field-label" for="edit-kind">Kind</label>
         <select id="edit-kind" name="kind">
           <option value="once">Once</option>

@@ -12,6 +12,8 @@ const titleInput = document.querySelector("#title");
 const descriptionInput = document.querySelector("#description");
 const assigneeInput = document.querySelector("#assignee");
 const dueDateInput = document.querySelector("#dueDate");
+const completeByFields = document.querySelector("#complete-by-fields");
+const completeByInput = document.querySelector("#completeBy");
 const kindInput = document.querySelector("#kind");
 const recurrenceFields = document.querySelector("#recurrence-fields");
 const recurrenceIntervalInput = document.querySelector("#recurrenceInterval");
@@ -51,6 +53,8 @@ const editForm = document.querySelector("#edit-form");
 const editTitleInput = document.querySelector("#edit-title");
 const editDescriptionInput = document.querySelector("#edit-description");
 const editAssigneeInput = document.querySelector("#edit-assignee");
+const editCompleteByFields = document.querySelector("#edit-complete-by-fields");
+const editCompleteByInput = document.querySelector("#edit-completeBy");
 const editKindInput = document.querySelector("#edit-kind");
 const editRecurrenceFields = document.querySelector("#edit-recurrence-fields");
 const editRecurrenceIntervalInput = document.querySelector("#edit-recurrenceInterval");
@@ -116,6 +120,14 @@ let pendingTaskCard = null;
 let paintedFromCache = false;
 /** @type {boolean} */
 let composerOpen = false;
+/** True after detectBackend finishes so claim release can persist. */
+let backendReady = false;
+/** @type {Set<string>} */
+const pendingReleaseIds = new Set();
+/** @type {ReturnType<typeof setTimeout> | null} */
+let releasePersistTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let releaseTickTimer = null;
 /** @type {MediaStream | null} */
 let proofStream = null;
 /** @type {MediaStream | null} */
@@ -143,6 +155,183 @@ function formatDue(dueDate) {
     month: "short",
     day: "numeric",
   }).format(date);
+}
+
+function formatCompleteBy(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function completeByFromLocalInput(value) {
+  if (!value) return undefined;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return date.toISOString();
+}
+
+function completeByToLocalInput(iso) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function claimHoldExpired(chore, now = Date.now()) {
+  const status = chore.instanceStatus || chore.status;
+  if (status === "done" || status === "waiting" || status === "retired") {
+    return false;
+  }
+  const until = chore.completeBy || chore.complete_by;
+  if (!until) return false;
+  if (status !== "assigned" && !chore.assignee && !chore.assigneePersonId) {
+    return false;
+  }
+  const ms = Date.parse(until);
+  return !Number.isNaN(ms) && ms <= now;
+}
+
+function releasedChoreView(chore) {
+  const next = { ...chore, status: "open", instanceStatus: "open" };
+  delete next.assignee;
+  delete next.assigneePersonId;
+  delete next.completeBy;
+  delete next.complete_by;
+  return next;
+}
+
+function schedulePersistReleases() {
+  if (releasePersistTimer) return;
+  releasePersistTimer = setTimeout(() => {
+    releasePersistTimer = null;
+    if (!backendReady) return;
+    void flushReleasedClaims();
+  }, 0);
+}
+
+function scheduleNextReleaseTick() {
+  if (releaseTickTimer) clearTimeout(releaseTickTimer);
+  releaseTickTimer = null;
+  const now = Date.now();
+  let soonest = null;
+  for (const chore of chores) {
+    const until = chore.completeBy || chore.complete_by;
+    const status = chore.instanceStatus || chore.status;
+    if (!until || status === "done" || status === "waiting" || status === "retired") {
+      continue;
+    }
+    const ms = Date.parse(until);
+    if (Number.isNaN(ms) || ms <= now) continue;
+    if (soonest === null || ms < soonest) soonest = ms;
+  }
+  if (soonest === null) return;
+  releaseTickTimer = setTimeout(() => {
+    render();
+  }, Math.max(0, soonest - Date.now() + 40));
+}
+
+/** Drop expired assignee holds in the in-memory list and queue a persist. */
+function absorbExpiredClaims() {
+  const now = Date.now();
+  let count = 0;
+  const next = chores.map((chore) => {
+    if (!claimHoldExpired(chore, now)) return chore;
+    count += 1;
+    pendingReleaseIds.add(String(chore.id));
+    return releasedChoreView(chore);
+  });
+  if (count === 0) return 0;
+  chores = next;
+  schedulePersistReleases();
+  if (pendingTaskCard && taskDialog?.open) {
+    const fresh = chores.find((c) => c.id === pendingTaskCard.id);
+    if (fresh && pendingTaskCard.assignee && !fresh.assignee) {
+      openTaskCard(fresh);
+    }
+  }
+  return count;
+}
+
+async function flushReleasedClaims() {
+  if (!backendReady || pendingReleaseIds.size === 0) return;
+  const ids = [...pendingReleaseIds];
+  pendingReleaseIds.clear();
+  const patch = {
+    status: "open",
+    assignee_person_id: null,
+    assignee: null,
+    assigned_at: null,
+    complete_by: null,
+  };
+  try {
+    if (backend === "supabase-rich") {
+      await Promise.all(
+        ids.map((id) =>
+          supabaseRequest(
+            `task_instances?id=eq.${encodeURIComponent(id)}&status=eq.assigned`,
+            {
+              method: "PATCH",
+              headers: { Prefer: "return=minimal" },
+              body: JSON.stringify(patch),
+            },
+          ).catch(() => null),
+        ),
+      );
+      await Promise.all(
+        ids.map((id) =>
+          supabaseRequest(`chores?id=eq.${encodeURIComponent(id)}`, {
+            method: "PATCH",
+            headers: { Prefer: "return=minimal" },
+            body: JSON.stringify({ assignee: null }),
+          }).catch(() => null),
+        ),
+      );
+    } else if (backend === "local") {
+      const store = loadLocalV2();
+      let changed = false;
+      store.instances = store.instances.map((row) => {
+        if (!ids.includes(row.id)) return row;
+        changed = true;
+        const cleared = { ...row, status: "open" };
+        delete cleared.assignee;
+        delete cleared.assigneePersonId;
+        delete cleared.assignee_person_id;
+        delete cleared.assignedAt;
+        delete cleared.assigned_at;
+        delete cleared.completeBy;
+        delete cleared.complete_by;
+        return cleared;
+      });
+      if (changed) saveLocalV2(store);
+    }
+  } catch (error) {
+    for (const id of ids) pendingReleaseIds.add(id);
+    console.warn("Could not release expired claims", error);
+  }
+}
+
+function syncCompleteByFields() {
+  const showAdd = Boolean(assigneeInput.value.trim());
+  completeByFields?.classList.toggle("hidden", !showAdd);
+  if (!showAdd && completeByInput) completeByInput.value = "";
+  const showEdit = Boolean(editAssigneeInput?.value.trim());
+  editCompleteByFields?.classList.toggle("hidden", !showEdit);
+  if (!showEdit && editCompleteByInput) editCompleteByInput.value = "";
+}
+
+function assignmentHoldError(assignee, completeByIso) {
+  if (!assignee) return null;
+  if (backend === "api" || backend === "supabase") return null;
+  if (!completeByIso) {
+    return "Set a complete-by time when assigning someone.";
+  }
+  return null;
 }
 
 function setStatus(message) {
@@ -543,6 +732,7 @@ function syncComposerAdminUi() {
       editKindInput.value !== "periodic",
     );
   }
+  syncCompleteByFields();
 }
 
 function supabaseConfigured() {
@@ -661,6 +851,7 @@ function instanceToView(row, template) {
     instanceStatus: status,
     ...(row.due_date ? { dueDate: row.due_date } : {}),
     ...(row.due_at ? { dueAt: row.due_at } : {}),
+    ...(row.complete_by ? { completeBy: row.complete_by } : {}),
     createdAt: row.created_at,
     ...(row.completed_at ? { completedAt: row.completed_at } : {}),
     templateId: row.template_id ?? undefined,
@@ -711,6 +902,49 @@ async function promoteDueWaitingRich(instanceRows) {
   return due.length > 0;
 }
 
+async function releaseExpiredClaimsRich(instanceRows) {
+  const nowIso = new Date().toISOString();
+  const now = Date.now();
+  const due = (instanceRows ?? []).filter((row) => {
+    if (row.status === "done" || row.status === "waiting" || row.status === "retired") {
+      return false;
+    }
+    if (!row.complete_by) return false;
+    const ms = Date.parse(row.complete_by);
+    if (Number.isNaN(ms) || ms > now) return false;
+    return row.status === "assigned" || Boolean(row.assignee || row.assignee_person_id);
+  });
+  await Promise.all(
+    due.map((row) =>
+      supabaseRequest(
+        `task_instances?id=eq.${encodeURIComponent(row.id)}&status=neq.done`,
+        {
+          method: "PATCH",
+          headers: { Prefer: "return=minimal" },
+          body: JSON.stringify({
+            status: "open",
+            assignee_person_id: null,
+            assignee: null,
+            assigned_at: null,
+            complete_by: null,
+            opened_at: nowIso,
+          }),
+        },
+      ).catch(() => null),
+    ),
+  );
+  await Promise.all(
+    due.map((row) =>
+      supabaseRequest(`chores?id=eq.${encodeURIComponent(row.id)}`, {
+        method: "PATCH",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({ assignee: null }),
+      }).catch(() => null),
+    ),
+  );
+  return due.length > 0;
+}
+
 async function listRichSupabase(status) {
   const [instanceRows, templateRows, peopleRows, completionRows] =
     await Promise.all([
@@ -728,7 +962,9 @@ async function listRichSupabase(status) {
   completions = completionRows ?? [];
   scoreRows = computeScoreboard(people, completions);
 
-  if (await promoteDueWaitingRich(instanceRows)) {
+  const promoted = await promoteDueWaitingRich(instanceRows);
+  const released = await releaseExpiredClaimsRich(instanceRows);
+  if (promoted || released) {
     const refreshed = await supabaseRequest(
       "task_instances?select=*&order=created_at.desc",
     );
@@ -853,6 +1089,7 @@ async function addRichSupabase(input) {
       opened_at: now,
       assigned_at: person ? now : null,
       due_date: input.dueDate || null,
+      complete_by: person && input.completeBy ? input.completeBy : null,
       source: "manual",
       created_at: now,
     }),
@@ -970,12 +1207,14 @@ async function updateRichTask(chore, input) {
       instancePatch.assignee_person_id = person.id;
       instancePatch.assignee = person.displayName;
       instancePatch.assigned_at = now;
+      instancePatch.complete_by = input.completeBy;
     } else {
       instancePatch.status =
         chore.instanceStatus === "noticed" ? "noticed" : "open";
       instancePatch.assignee_person_id = null;
       instancePatch.assignee = null;
       instancePatch.assigned_at = null;
+      instancePatch.complete_by = null;
     }
   }
 
@@ -1086,6 +1325,7 @@ async function selfAssignRich(chore) {
         assignee_person_id: person.id,
         assignee: person.displayName,
         assigned_at: now,
+        complete_by: null,
       }),
     },
   );
@@ -1338,6 +1578,42 @@ function saveLocalV2(store) {
   localStorage.setItem(STORAGE_KEY_V2, JSON.stringify(store));
 }
 
+function clearLocalHold(row) {
+  const next = { ...row, status: "open" };
+  delete next.assigneePersonId;
+  delete next.assignee_person_id;
+  delete next.assignee;
+  delete next.assignedAt;
+  delete next.assigned_at;
+  delete next.completeBy;
+  delete next.complete_by;
+  return next;
+}
+
+function releaseLocalClaims(store) {
+  const now = Date.now();
+  let changed = false;
+  const instances = store.instances.map((row) => {
+    const status = row.status;
+    const until = row.completeBy ?? row.complete_by;
+    if (!until) return row;
+    if (status === "done" || status === "waiting" || status === "retired") {
+      return row;
+    }
+    const ms = Date.parse(until);
+    if (Number.isNaN(ms) || ms > now) return row;
+    if (status !== "assigned" && !row.assignee && !row.assigneePersonId && !row.assignee_person_id) {
+      return row;
+    }
+    changed = true;
+    return clearLocalHold(row);
+  });
+  if (!changed) return store;
+  const nextStore = { ...store, instances };
+  saveLocalV2(nextStore);
+  return nextStore;
+}
+
 function promoteLocalWaiting(store) {
   const now = Date.now();
   let changed = false;
@@ -1348,12 +1624,8 @@ function promoteLocalWaiting(store) {
     const ms = Date.parse(dueAt);
     if (Number.isNaN(ms) || ms > now) return row;
     changed = true;
-    const next = { ...row, status: "open", openedAt: new Date().toISOString() };
-    delete next.assigneePersonId;
-    delete next.assignee_person_id;
-    delete next.assignee;
-    delete next.assignedAt;
-    delete next.assigned_at;
+    const next = clearLocalHold(row);
+    next.openedAt = new Date().toISOString();
     return next;
   });
   if (!changed) return store;
@@ -1363,7 +1635,7 @@ function promoteLocalWaiting(store) {
 }
 
 function listLocal(status) {
-  let store = promoteLocalWaiting(loadLocalV2());
+  let store = releaseLocalClaims(promoteLocalWaiting(loadLocalV2()));
   people = store.people.map((p) => ({
     id: p.id,
     displayName: p.displayName ?? p.display_name,
@@ -1395,6 +1667,7 @@ function listLocal(status) {
       assignee_person_id: row.assigneePersonId ?? row.assignee_person_id,
       due_date: row.dueDate ?? row.due_date,
       due_at: row.dueAt ?? row.due_at,
+      complete_by: row.completeBy ?? row.complete_by,
       created_at: row.createdAt ?? row.created_at,
       completed_at: row.completedAt ?? row.completed_at,
       template_id: row.templateId ?? row.template_id,
@@ -1635,6 +1908,12 @@ function renderPeoplePanel() {
 }
 
 function render() {
+  const releasedNow = absorbExpiredClaims();
+  scheduleNextReleaseTick();
+  if (releasedNow > 0) {
+    setStatus("Complete-by passed — open for anyone to mark done.");
+    writeSwrCache();
+  }
   if (filter === "scores") {
     renderScoreboard();
     return;
@@ -1715,6 +1994,16 @@ function buildTaskMeta(chore) {
     assignee.className = "meta-pill";
     assignee.textContent = chore.assignee;
     meta.append(assignee);
+  }
+  if (
+    chore.assignee &&
+    chore.completeBy &&
+    (chore.instanceStatus === "assigned" || chore.status === "assigned")
+  ) {
+    const hold = document.createElement("span");
+    hold.className = "meta-pill";
+    hold.textContent = `Complete by ${formatCompleteBy(chore.completeBy)}`;
+    meta.append(hold);
   }
   const recur = formatRecurrenceLabel(
     chore.kind,
@@ -2060,6 +2349,9 @@ function openEditDialog(chore) {
   editTitleInput.value = chore.title || "";
   editDescriptionInput.value = chore.description || "";
   editAssigneeInput.value = chore.assignee || "";
+  if (editCompleteByInput) {
+    editCompleteByInput.value = completeByToLocalInput(chore.completeBy);
+  }
   editKindInput.value = chore.kind || "once";
   editRecurrenceIntervalInput.value = String(
     chore.recurrenceInterval || DEFAULT_PERIODIC_INTERVAL,
@@ -2094,6 +2386,7 @@ function collectEditPayload() {
     title: editTitleInput.value.trim(),
     description: editDescriptionInput.value.trim() || undefined,
     assignee: editAssigneeInput.value.trim() || undefined,
+    completeBy: completeByFromLocalInput(editCompleteByInput?.value),
     kind,
     recurrenceInterval: recurrence.recurrenceInterval,
     recurrenceUnit: recurrence.recurrenceUnit,
@@ -2181,11 +2474,14 @@ async function updateLocalTask(chore, input) {
       next.assigneePersonId = person.id;
       next.assignee = person.displayName;
       next.assignedAt = new Date().toISOString();
+      next.completeBy = input.completeBy;
     } else {
       next.status = current.status === "noticed" ? "noticed" : "open";
       delete next.assigneePersonId;
       delete next.assignee;
       delete next.assignedAt;
+      delete next.completeBy;
+      delete next.complete_by;
     }
   }
   store.instances[index] = next;
@@ -2203,6 +2499,12 @@ async function updateLegacyTask(chore, input) {
 async function saveEditTask(chore, input) {
   if (!input.title) {
     setStatus("Title is required.");
+    return;
+  }
+  const holdError = assignmentHoldError(input.assignee, input.completeBy);
+  if (holdError) {
+    setStatus(holdError);
+    if (typeof editDialog.showModal === "function") editDialog.showModal();
     return;
   }
   try {
@@ -2240,6 +2542,8 @@ async function claimChore(chore) {
         assignee: person.displayName,
         assignedAt: new Date().toISOString(),
       };
+      delete store.instances[index].completeBy;
+      delete store.instances[index].complete_by;
       saveLocalV2(store);
     } else if (backend === "supabase") {
       const name =
@@ -2691,6 +2995,14 @@ taskDialog?.addEventListener("close", () => {
   pendingTaskCard = null;
 });
 
+assigneeInput.addEventListener("input", () => {
+  syncCompleteByFields();
+});
+
+editAssigneeInput?.addEventListener("input", () => {
+  syncCompleteByFields();
+});
+
 meSelect.addEventListener("change", () => {
   localStorage.setItem(ME_KEY, meSelect.value);
   syncComposerAdminUi();
@@ -2753,6 +3065,7 @@ form.addEventListener("submit", async (event) => {
       description: descriptionInput.value.trim() || undefined,
       assignee: assigneeInput.value.trim() || undefined,
       dueDate: dueDateInput.value || undefined,
+      completeBy: completeByFromLocalInput(completeByInput?.value),
       kind,
       recurrenceInterval: recurrence.recurrenceInterval,
       recurrenceUnit: recurrence.recurrenceUnit,
@@ -2763,6 +3076,12 @@ form.addEventListener("submit", async (event) => {
       steps: parseSteps(stepsInput.value),
       referenceFile: referencePhotoInput.files?.[0] ?? null,
     };
+    const holdError = assignmentHoldError(payload.assignee, payload.completeBy);
+    if (holdError) {
+      setStatus(holdError);
+      submit.disabled = false;
+      return;
+    }
     if (backend === "supabase-rich") {
       await addRichSupabase(payload);
       if (payload.assignee) await findOrCreatePerson(payload.assignee);
@@ -2829,6 +3148,9 @@ form.addEventListener("submit", async (event) => {
         assigneePersonId: person?.id,
         assignee: person?.displayName,
         dueDate: payload.dueDate,
+        ...(person && payload.completeBy
+          ? { completeBy: payload.completeBy }
+          : {}),
         createdAt: now,
         source: "manual",
       });
@@ -2889,6 +3211,8 @@ paintFromSwrCache();
 
 void (async () => {
   backend = await detectBackend();
+  backendReady = true;
+  if (pendingReleaseIds.size > 0) schedulePersistReleases();
   if (backend === "supabase-rich") {
     setStatus(
       paintedFromCache

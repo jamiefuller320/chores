@@ -85,6 +85,12 @@ export type TaskInstance = {
   completedAt?: string;
   dueAt?: string;
   dueDate?: string;
+  /**
+   * Assignee holds this instance only until this instant. After it passes
+   * while the task is still unfinished, releaseExpiredClaims clears the
+   * assignee and returns status to open.
+   */
+  completeBy?: string;
   source: "notice" | "schedule" | "manual" | "split";
   createdAt: string;
 };
@@ -260,6 +266,8 @@ export type NoticeInput = {
   steps?: TemplateStep[];
   referencePhotoPath?: string;
   dueDate?: string;
+  /** ISO time the assignee must finish by; hold releases after this. */
+  completeBy?: string;
   source?: TaskInstance["source"];
 };
 
@@ -353,6 +361,9 @@ export function noticeTask(
       : {}),
     openedAt: now,
     ...(input.dueDate?.trim() ? { dueDate: input.dueDate.trim() } : {}),
+    ...(assigned && input.completeBy && !Number.isNaN(Date.parse(input.completeBy))
+      ? { completeBy: new Date(input.completeBy).toISOString() }
+      : {}),
     source: input.source ?? "manual",
     createdAt: now,
   };
@@ -372,6 +383,7 @@ export function selfAssign(
   store: HouseholdModelStore,
   instanceId: string,
   personId: string,
+  completeBy?: string | null,
 ):
   | { ok: true; store: HouseholdModelStore; instance: TaskInstance }
   | { ok: false; error: string } {
@@ -392,13 +404,19 @@ export function selfAssign(
   }
 
   const now = new Date().toISOString();
+  const hold =
+    completeBy && !Number.isNaN(Date.parse(completeBy))
+      ? new Date(completeBy).toISOString()
+      : undefined;
   const next: TaskInstance = {
     ...current,
     status: "assigned",
     assigneePersonId: person.id,
     assignee: person.displayName,
     assignedAt: now,
+    ...(hold ? { completeBy: hold } : {}),
   };
+  if (!hold) delete next.completeBy;
   const instances = store.instances.slice();
   instances[index] = next;
   return { ok: true, store: { ...store, instances }, instance: next };
@@ -408,6 +426,7 @@ export function assignByName(
   store: HouseholdModelStore,
   instanceId: string,
   displayName: string,
+  completeBy?: string,
 ):
   | {
       ok: true;
@@ -421,7 +440,7 @@ export function assignByName(
     return clearAssignee(store, instanceId);
   }
   const { store: withPerson, person } = upsertPersonByName(store, name);
-  const result = selfAssign(withPerson, instanceId, person.id);
+  const result = selfAssign(withPerson, instanceId, person.id, completeBy);
   if (!result.ok) return result;
   return { ok: true, store: result.store, instance: result.instance, person };
 }
@@ -444,6 +463,7 @@ export function clearAssignee(
   delete next.assigneePersonId;
   delete next.assignee;
   delete next.assignedAt;
+  delete next.completeBy;
   const instances = store.instances.slice();
   instances[index] = next;
   return { ok: true, store: { ...store, instances }, instance: next };
@@ -707,6 +727,47 @@ export function promoteDueWaiting(
     delete next.assigneePersonId;
     delete next.assignee;
     delete next.assignedAt;
+    delete next.completeBy;
+    return next;
+  });
+  return changed ? { ...store, instances } : store;
+}
+
+/**
+ * After completeBy, an unfinished assignment is released: assignee cleared,
+ * status open, so anyone can mark it done. Done / waiting / retired rows stay.
+ */
+export function releaseExpiredClaims(
+  store: HouseholdModelStore,
+  nowIso: string = new Date().toISOString(),
+): HouseholdModelStore {
+  const now = Date.parse(nowIso);
+  if (Number.isNaN(now)) return store;
+  let changed = false;
+  const instances = store.instances.map((instance) => {
+    if (
+      instance.status === "done" ||
+      instance.status === "waiting" ||
+      instance.status === "retired" ||
+      !instance.completeBy
+    ) {
+      return instance;
+    }
+    const hold = Date.parse(instance.completeBy);
+    if (Number.isNaN(hold) || hold > now) return instance;
+    if (
+      instance.status !== "assigned" &&
+      !instance.assignee &&
+      !instance.assigneePersonId
+    ) {
+      return instance;
+    }
+    changed = true;
+    const next: TaskInstance = { ...instance, status: "open" };
+    delete next.assigneePersonId;
+    delete next.assignee;
+    delete next.assignedAt;
+    delete next.completeBy;
     return next;
   });
   return changed ? { ...store, instances } : store;

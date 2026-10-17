@@ -125,12 +125,18 @@ body {
 }
 
 .recurrence-fields,
-.points-fields {
+.points-fields,
+.complete-by-fields {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.45rem 0.55rem;
   margin-top: 0.45rem;
+}
+
+.complete-by-fields input[type="datetime-local"] {
+  flex: 1 1 12rem;
+  min-width: 12rem;
 }
 
 .recurrence-fields input[type="number"],
@@ -235,6 +241,7 @@ body {
 .sheet-body input[type="text"],
 .sheet-body input[type="number"],
 .sheet-body input[type="date"],
+.sheet-body input[type="datetime-local"],
 .sheet-body select,
 .sheet-body textarea {
   width: 100%;

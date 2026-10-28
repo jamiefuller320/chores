@@ -19,35 +19,47 @@ export {
 } from "./chores.js";
 
 export {
+  applyWeeklyPointsReset,
   assessCompletion,
   assignByName,
+  awardTimeIso,
   completeInstance,
+  currentWeekStartIso,
   emptyModelStore,
   formatRecurrenceLabel,
   isAdminRole,
   listOpenInstances,
+  needsWeeklyPointsReset,
   noticeTask,
+  periodLabelForWeekEnding,
+  planWeeklyPointsReset,
   promoteDueWaiting,
   releaseExpiredClaims,
   resolveRecurrence,
   scoreboard,
   selfAssign,
   setTemplatePoints,
+  zonedLocalToUtcMs,
+  DEFAULT_HOUSEHOLD_TIMEZONE,
   DEFAULT_PERIODIC_INTERVAL,
   DEFAULT_PERIODIC_UNIT,
   DEFAULT_TASK_POINTS,
+  HOUSEHOLD_META_ID,
   PROOF_PHOTO_TTL_DAYS,
 } from "./model.js";
 
 export type {
   AssessmentStatus,
   CompletionEvent,
+  HouseholdMeta,
   HouseholdModelStore,
   Person,
+  PointsHistoryRow,
   RecurrenceUnit,
   ScoreboardRow,
   TaskInstance,
   TaskTemplate,
+  WeeklyResetPlan,
 } from "./model.js";
 
 export { isSupabaseConfigured, SUPABASE_CREDENTIAL_NOTES };

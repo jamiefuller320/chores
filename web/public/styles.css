@@ -332,6 +332,33 @@ body {
   gap: 0.65rem;
 }
 
+.score-section-label {
+  margin: 0.35rem 0 0.15rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.score-history-heading {
+  margin-top: 1.25rem;
+}
+
+.score-history-week {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.35rem;
+}
+
+.score-history-label {
+  margin: 0.25rem 0 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
 .score-row {
   display: flex;
   justify-content: space-between;
@@ -343,6 +370,16 @@ body {
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   animation: pop 320ms ease-out both;
+}
+
+.score-row-history {
+  padding: 0.7rem 0.95rem;
+  box-shadow: none;
+  background: color-mix(in srgb, var(--paper) 88%, transparent);
+}
+
+.score-row-history .score-points {
+  font-size: 1.25rem;
 }
 
 .score-name {

@@ -1,18 +1,22 @@
 /** Richer chore domain (people, templates, instances, completions). */
 
 import {
+  DEFAULT_HOUSEHOLD_TIMEZONE,
   DEFAULT_LEAF_MINUTES,
   DEFAULT_PERIODIC_INTERVAL,
   DEFAULT_PERIODIC_UNIT,
   DEFAULT_TASK_POINTS,
+  HOUSEHOLD_META_ID,
   PROOF_PHOTO_TTL_DAYS,
 } from "./constants.js";
 
 export { PROOF_PHOTO_TTL_DAYS };
 export {
+  DEFAULT_HOUSEHOLD_TIMEZONE,
   DEFAULT_PERIODIC_INTERVAL,
   DEFAULT_PERIODIC_UNIT,
   DEFAULT_TASK_POINTS,
+  HOUSEHOLD_META_ID,
 };
 
 export type PersonRole = "parent" | "child" | "other";
@@ -116,11 +120,32 @@ export type CompletionEvent = {
   createdAt: string;
 };
 
+export type PointsHistoryRow = {
+  id: string;
+  weekEnding: string;
+  periodLabel?: string;
+  personId: string;
+  displayName: string;
+  points: number;
+  createdAt: string;
+};
+
+export type HouseholdMeta = {
+  id: string;
+  timezone: string;
+  lastPointsResetAt?: string;
+  updatedAt: string;
+};
+
 export type HouseholdModelStore = {
   people: Person[];
   templates: TaskTemplate[];
   instances: TaskInstance[];
   completions: CompletionEvent[];
+  /** Closed-week scoreboard snapshots (optional; local / rich stores). */
+  pointsHistory?: PointsHistoryRow[];
+  /** Household timezone + last weekly reset (optional). */
+  householdMeta?: HouseholdMeta;
 };
 
 export type ScoreboardRow = {
@@ -131,7 +156,18 @@ export type ScoreboardRow = {
 };
 
 export function emptyModelStore(): HouseholdModelStore {
-  return { people: [], templates: [], instances: [], completions: [] };
+  return {
+    people: [],
+    templates: [],
+    instances: [],
+    completions: [],
+    pointsHistory: [],
+    householdMeta: {
+      id: HOUSEHOLD_META_ID,
+      timezone: DEFAULT_HOUSEHOLD_TIMEZONE,
+      updatedAt: new Date(0).toISOString(),
+    },
+  };
 }
 
 export function newId(prefix: string): string {
@@ -685,11 +721,32 @@ export function setTemplatePoints(
   return { ok: true, store: { ...store, templates }, template: next };
 }
 
-/** Running points from approved completions. */
-export function scoreboard(store: HouseholdModelStore): ScoreboardRow[] {
+/** When points count toward the scoreboard (approve time, else complete time). */
+export function awardTimeIso(event: CompletionEvent): string | undefined {
+  return event.assessedAt ?? event.completedAt;
+}
+
+/**
+ * Running points from approved completions.
+ * When `sinceIso` is set (last weekly reset), only awards at/after that instant count —
+ * current scoreboard = this week's approved points (additive history model).
+ */
+export function scoreboard(
+  store: HouseholdModelStore,
+  sinceIso?: string | null,
+): ScoreboardRow[] {
+  const sinceMs =
+    sinceIso && !Number.isNaN(Date.parse(sinceIso))
+      ? Date.parse(sinceIso)
+      : null;
   const totals = new Map<string, number>();
   for (const event of store.completions) {
     if (event.assessmentStatus !== "approved" || !event.personId) continue;
+    if (sinceMs != null) {
+      const awarded = awardTimeIso(event);
+      const awardedMs = awarded ? Date.parse(awarded) : NaN;
+      if (Number.isNaN(awardedMs) || awardedMs < sinceMs) continue;
+    }
     const add = event.pointsAwarded ?? 0;
     totals.set(event.personId, (totals.get(event.personId) ?? 0) + add);
   }
@@ -705,6 +762,253 @@ export function scoreboard(store: HouseholdModelStore): ScoreboardRow[] {
       (a, b) =>
         b.points - a.points || a.displayName.localeCompare(b.displayName),
     );
+}
+
+type ZonedParts = {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+  weekday: string;
+};
+
+function zonedParts(timeZone: string, date: Date): ZonedParts {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const raw = Object.fromEntries(
+    dtf
+      .formatToParts(date)
+      .filter((p) => p.type !== "literal")
+      .map((p) => [p.type, p.value]),
+  ) as Record<string, string>;
+  let hour = Number(raw.hour);
+  if (hour === 24) hour = 0;
+  return {
+    year: Number(raw.year),
+    month: Number(raw.month),
+    day: Number(raw.day),
+    hour,
+    minute: Number(raw.minute),
+    second: Number(raw.second),
+    weekday: raw.weekday,
+  };
+}
+
+/** UTC ms for a civil wall time in `timeZone` (handles DST via offset probe). */
+export function zonedLocalToUtcMs(
+  timeZone: string,
+  year: number,
+  month: number,
+  day: number,
+  hour = 0,
+  minute = 0,
+  second = 0,
+): number {
+  const utcGuess = Date.UTC(year, month - 1, day, hour, minute, second);
+  const asLocal = zonedParts(timeZone, new Date(utcGuess));
+  const asLocalUtc = Date.UTC(
+    asLocal.year,
+    asLocal.month - 1,
+    asLocal.day,
+    asLocal.hour,
+    asLocal.minute,
+    asLocal.second,
+  );
+  const wanted = Date.UTC(year, month - 1, day, hour, minute, second);
+  return utcGuess + (wanted - asLocalUtc);
+}
+
+/**
+ * Most recent Monday 00:00:00 in household TZ that is <= now.
+ * That boundary closes Sunday night and opens the new points week.
+ */
+export function currentWeekStartIso(
+  timeZone: string = DEFAULT_HOUSEHOLD_TIMEZONE,
+  now: Date = new Date(),
+): string {
+  const parts = zonedParts(timeZone, now);
+  const weekdayMap: Record<string, number> = {
+    Sun: 0,
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6,
+  };
+  const dow = weekdayMap[parts.weekday] ?? 1;
+  const daysSinceMonday = (dow + 6) % 7;
+  const mondayUtc = Date.UTC(parts.year, parts.month - 1, parts.day);
+  const mondayDate = new Date(mondayUtc - daysSinceMonday * 86400000);
+  const y = mondayDate.getUTCFullYear();
+  const m = mondayDate.getUTCMonth() + 1;
+  const d = mondayDate.getUTCDate();
+  return new Date(zonedLocalToUtcMs(timeZone, y, m, d, 0, 0, 0)).toISOString();
+}
+
+/** Human label for the week that closed at `weekEndingIso` (Monday 00:00). */
+export function periodLabelForWeekEnding(
+  weekEndingIso: string,
+  timeZone: string = DEFAULT_HOUSEHOLD_TIMEZONE,
+): string {
+  const endMs = Date.parse(weekEndingIso);
+  if (Number.isNaN(endMs)) return "Past week";
+  // Sunday that just ended = day before Monday boundary.
+  const sunday = new Date(endMs - 86400000);
+  const parts = zonedParts(timeZone, sunday);
+  const months = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ];
+  return `Week ending ${parts.day} ${months[parts.month - 1]} ${parts.year}`;
+}
+
+export function needsWeeklyPointsReset(
+  lastResetAt: string | null | undefined,
+  weekStartIso: string,
+): boolean {
+  if (!lastResetAt) return false;
+  const last = Date.parse(lastResetAt);
+  const week = Date.parse(weekStartIso);
+  if (Number.isNaN(last) || Number.isNaN(week)) return false;
+  return last < week;
+}
+
+export type WeeklyResetPlan = {
+  /** First encounter: seed last_reset without wiping the board mid-week. */
+  action: "seed" | "reset" | "none";
+  weekStartIso: string;
+  periodLabel: string;
+  /** Rows to upsert into points_history when action is reset (or prior on seed). */
+  historyRows: Omit<PointsHistoryRow, "id" | "createdAt">[];
+  nextLastResetAt: string;
+};
+
+/**
+ * Plan the Sunday-night points rollover.
+ * - seed (null last_reset): keep current board; remember this week start.
+ *   Optionally archive pre-week awards as "Prior to weekly resets".
+ * - reset (last_reset < week start): snapshot totals since last_reset, advance cursor.
+ */
+export function planWeeklyPointsReset(
+  store: HouseholdModelStore,
+  now: Date = new Date(),
+): WeeklyResetPlan {
+  const tz =
+    store.householdMeta?.timezone?.trim() || DEFAULT_HOUSEHOLD_TIMEZONE;
+  const weekStartIso = currentWeekStartIso(tz, now);
+  const lastResetAt = store.householdMeta?.lastPointsResetAt;
+  const periodLabel = periodLabelForWeekEnding(weekStartIso, tz);
+
+  if (!lastResetAt) {
+    // Archive awards from before this Monday so the live board can filter
+    // on week start without losing older totals from the history view.
+    const thisWeek = new Map(
+      scoreboard(store, weekStartIso).map((r) => [r.personId, r.points]),
+    );
+    const historyRows = scoreboard(store, null)
+      .map((row) => ({
+        weekEnding: weekStartIso,
+        periodLabel: "Prior to weekly resets",
+        personId: row.personId,
+        displayName: row.displayName,
+        points: Math.max(0, row.points - (thisWeek.get(row.personId) ?? 0)),
+      }))
+      .filter((row) => row.points > 0);
+    return {
+      action: "seed",
+      weekStartIso,
+      periodLabel,
+      historyRows,
+      nextLastResetAt: weekStartIso,
+    };
+  }
+
+  if (!needsWeeklyPointsReset(lastResetAt, weekStartIso)) {
+    return {
+      action: "none",
+      weekStartIso,
+      periodLabel,
+      historyRows: [],
+      nextLastResetAt: lastResetAt,
+    };
+  }
+
+  // Closed week = awards since last_reset, excluding anything already in the new week.
+  const sinceWeek = new Map(
+    scoreboard(store, weekStartIso).map((r) => [r.personId, r.points]),
+  );
+  const historyRows = scoreboard(store, lastResetAt)
+    .map((row) => ({
+      weekEnding: weekStartIso,
+      periodLabel,
+      personId: row.personId,
+      displayName: row.displayName,
+      points: Math.max(0, row.points - (sinceWeek.get(row.personId) ?? 0)),
+    }))
+    .filter((row) => row.points > 0);
+
+  return {
+    action: "reset",
+    weekStartIso,
+    periodLabel,
+    historyRows,
+    nextLastResetAt: weekStartIso,
+  };
+}
+
+/** Apply a weekly reset plan to an in-memory store (local / tests). */
+export function applyWeeklyPointsReset(
+  store: HouseholdModelStore,
+  plan: WeeklyResetPlan,
+  nowIso: string = new Date().toISOString(),
+): HouseholdModelStore {
+  if (plan.action === "none") return store;
+  const history = [...(store.pointsHistory ?? [])];
+  for (const row of plan.historyRows) {
+    const exists = history.some(
+      (h) => h.weekEnding === row.weekEnding && h.personId === row.personId,
+    );
+    if (exists) continue;
+    history.push({
+      id: newId("ph"),
+      weekEnding: row.weekEnding,
+      ...(row.periodLabel ? { periodLabel: row.periodLabel } : {}),
+      personId: row.personId,
+      displayName: row.displayName,
+      points: row.points,
+      createdAt: nowIso,
+    });
+  }
+  const meta: HouseholdMeta = {
+    id: store.householdMeta?.id ?? HOUSEHOLD_META_ID,
+    timezone:
+      store.householdMeta?.timezone?.trim() || DEFAULT_HOUSEHOLD_TIMEZONE,
+    lastPointsResetAt: plan.nextLastResetAt,
+    updatedAt: nowIso,
+  };
+  return { ...store, pointsHistory: history, householdMeta: meta };
 }
 
 /** Promote due waiting instances to open (cleared assignee). */

@@ -15,3 +15,12 @@ export const DEFAULT_PERIODIC_UNIT = "week" as const;
 
 /** Default reward points on a new template. */
 export const DEFAULT_TASK_POINTS = 1;
+
+/**
+ * Household calendar timezone for Sunday-night points reset.
+ * Override via `household_meta.timezone` in Supabase.
+ */
+export const DEFAULT_HOUSEHOLD_TIMEZONE = "Europe/London";
+
+/** Singleton row id for `household_meta`. */
+export const HOUSEHOLD_META_ID = "default";

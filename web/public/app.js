@@ -89,6 +89,8 @@ const PHOTO_BUCKET = "chore-photos";
 const DEFAULT_PERIODIC_INTERVAL = 4;
 const DEFAULT_PERIODIC_UNIT = "week";
 const DEFAULT_TASK_POINTS = 1;
+const DEFAULT_HOUSEHOLD_TIMEZONE = "Europe/London";
+const HOUSEHOLD_META_ID = "default";
 /**
  * v1 product default: treat the Pages UI as full parent/admin mode.
  * Real logins + password-reset authority come later (see chore-model-plan).
@@ -106,6 +108,12 @@ let templatesById = new Map();
 let completions = [];
 /** @type {Array<{personId: string, displayName: string, role: string, points: number}>} */
 let scoreRows = [];
+/** @type {Array<{id: string, weekEnding: string, periodLabel?: string, personId: string, displayName: string, points: number}>} */
+let pointsHistory = [];
+/** @type {string | null} */
+let lastPointsResetAt = null;
+/** @type {string} */
+let householdTimezone = DEFAULT_HOUSEHOLD_TIMEZONE;
 /** @type {"supabase-rich" | "supabase" | "api" | "local"} */
 let backend = "local";
 /** @type {ReturnType<typeof setInterval> | null} */
@@ -407,6 +415,8 @@ function writeSwrCache() {
       backend,
       people,
       scoreRows,
+      pointsHistory,
+      lastPointsResetAt,
       openChores: openViews,
       allChores: chores,
     };
@@ -421,6 +431,10 @@ function paintFromSwrCache() {
   if (!cached) return false;
   people = Array.isArray(cached.people) ? cached.people : [];
   scoreRows = Array.isArray(cached.scoreRows) ? cached.scoreRows : [];
+  pointsHistory = Array.isArray(cached.pointsHistory)
+    ? mapHistoryRows(cached.pointsHistory)
+    : [];
+  lastPointsResetAt = cached.lastPointsResetAt ?? null;
   if (filter === "open" && Array.isArray(cached.openChores)) {
     chores = cached.openChores;
   } else if (Array.isArray(cached.allChores)) {
@@ -699,12 +713,34 @@ function nextDueAt(completedAtIso, kind, interval, unit) {
   return new Date(base + (cooldownDays ?? 28) * 86400000).toISOString();
 }
 
-function computeScoreboard(peopleList, completionList) {
+function awardTimeIso(event) {
+  return (
+    event.assessedAt ??
+    event.assessed_at ??
+    event.completedAt ??
+    event.completed_at
+  );
+}
+
+/**
+ * Current scoreboard = approved awards since last weekly reset (additive model).
+ * Completions are never deleted; history rows hold closed-week totals.
+ */
+function computeScoreboard(peopleList, completionList, sinceIso = null) {
+  const sinceMs =
+    sinceIso && !Number.isNaN(Date.parse(sinceIso))
+      ? Date.parse(sinceIso)
+      : null;
   const totals = new Map();
   for (const event of completionList) {
     const status = event.assessmentStatus ?? event.assessment_status;
     const personId = event.personId ?? event.person_id;
     if (status !== "approved" || !personId) continue;
+    if (sinceMs != null) {
+      const awarded = awardTimeIso(event);
+      const awardedMs = awarded ? Date.parse(awarded) : NaN;
+      if (Number.isNaN(awardedMs) || awardedMs < sinceMs) continue;
+    }
     const add = Number(event.pointsAwarded ?? event.points_awarded ?? 0);
     totals.set(personId, (totals.get(personId) ?? 0) + add);
   }
@@ -719,6 +755,114 @@ function computeScoreboard(peopleList, completionList) {
       (a, b) =>
         b.points - a.points || a.displayName.localeCompare(b.displayName),
     );
+}
+
+function zonedParts(timeZone, date) {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  const raw = Object.fromEntries(
+    dtf
+      .formatToParts(date)
+      .filter((p) => p.type !== "literal")
+      .map((p) => [p.type, p.value]),
+  );
+  let hour = Number(raw.hour);
+  if (hour === 24) hour = 0;
+  return {
+    year: Number(raw.year),
+    month: Number(raw.month),
+    day: Number(raw.day),
+    hour,
+    minute: Number(raw.minute),
+    second: Number(raw.second),
+    weekday: raw.weekday,
+  };
+}
+
+function zonedLocalToUtcMs(timeZone, year, month, day, hour = 0, minute = 0, second = 0) {
+  const utcGuess = Date.UTC(year, month - 1, day, hour, minute, second);
+  const asLocal = zonedParts(timeZone, new Date(utcGuess));
+  const asLocalUtc = Date.UTC(
+    asLocal.year,
+    asLocal.month - 1,
+    asLocal.day,
+    asLocal.hour,
+    asLocal.minute,
+    asLocal.second,
+  );
+  const wanted = Date.UTC(year, month - 1, day, hour, minute, second);
+  return utcGuess + (wanted - asLocalUtc);
+}
+
+/** Most recent Monday 00:00 household TZ (<= now) — closes Sunday night. */
+function currentWeekStartIso(timeZone = householdTimezone, now = new Date()) {
+  const parts = zonedParts(timeZone, now);
+  const weekdayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const dow = weekdayMap[parts.weekday] ?? 1;
+  const daysSinceMonday = (dow + 6) % 7;
+  const mondayUtc = Date.UTC(parts.year, parts.month - 1, parts.day);
+  const mondayDate = new Date(mondayUtc - daysSinceMonday * 86400000);
+  const y = mondayDate.getUTCFullYear();
+  const m = mondayDate.getUTCMonth() + 1;
+  const d = mondayDate.getUTCDate();
+  return new Date(zonedLocalToUtcMs(timeZone, y, m, d, 0, 0, 0)).toISOString();
+}
+
+function periodLabelForWeekEnding(weekEndingIso, timeZone = householdTimezone) {
+  const endMs = Date.parse(weekEndingIso);
+  if (Number.isNaN(endMs)) return "Past week";
+  const sunday = new Date(endMs - 86400000);
+  const parts = zonedParts(timeZone, sunday);
+  const months = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ];
+  return `Week ending ${parts.day} ${months[parts.month - 1]} ${parts.year}`;
+}
+
+function mapHistoryRows(rows) {
+  return (rows ?? []).map((row) => ({
+    id: row.id,
+    weekEnding: row.weekEnding ?? row.week_ending,
+    periodLabel: row.periodLabel ?? row.period_label ?? undefined,
+    personId: row.personId ?? row.person_id,
+    displayName: row.displayName ?? row.display_name,
+    points: Number(row.points ?? 0),
+    createdAt: row.createdAt ?? row.created_at,
+  }));
+}
+
+function groupHistoryByWeek(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    const key = `${row.weekEnding}::${row.periodLabel ?? ""}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        weekEnding: row.weekEnding,
+        periodLabel: row.periodLabel || periodLabelForWeekEnding(row.weekEnding),
+        rows: [],
+      });
+    }
+    groups.get(key).rows.push(row);
+  }
+  return [...groups.values()]
+    .map((g) => ({
+      ...g,
+      rows: g.rows.sort(
+        (a, b) =>
+          b.points - a.points || a.displayName.localeCompare(b.displayName),
+      ),
+    }))
+    .sort((a, b) => Date.parse(b.weekEnding) - Date.parse(a.weekEnding));
 }
 
 function syncComposerAdminUi() {
@@ -945,13 +1089,185 @@ async function releaseExpiredClaimsRich(instanceRows) {
   return due.length > 0;
 }
 
+async function fetchHouseholdMetaRich() {
+  try {
+    const rows = await supabaseRequest(
+      `household_meta?id=eq.${encodeURIComponent(HOUSEHOLD_META_ID)}&select=*`,
+    );
+    const row = rows?.[0];
+    if (!row) {
+      return {
+        id: HOUSEHOLD_META_ID,
+        timezone: DEFAULT_HOUSEHOLD_TIMEZONE,
+        last_points_reset_at: null,
+      };
+    }
+    return row;
+  } catch {
+    // Schema not applied yet — skip weekly reset until James pastes SQL.
+    return null;
+  }
+}
+
+async function fetchPointsHistoryRich() {
+  try {
+    const rows = await supabaseRequest(
+      "points_history?select=*&order=week_ending.desc",
+    );
+    return mapHistoryRows(rows);
+  } catch {
+    return [];
+  }
+}
+
+async function upsertPointsHistoryRich(historyRows) {
+  if (!historyRows.length) return;
+  const payload = historyRows.map((row) => ({
+    id: row.id || newId("ph"),
+    week_ending: row.weekEnding,
+    period_label: row.periodLabel ?? null,
+    person_id: row.personId,
+    display_name: row.displayName,
+    points: Math.max(0, Math.floor(Number(row.points) || 0)),
+    created_at: row.createdAt || new Date().toISOString(),
+  }));
+  await supabaseRequest(
+    "points_history?on_conflict=week_ending,person_id",
+    {
+      method: "POST",
+      headers: { Prefer: "resolution=ignore-duplicates,return=minimal" },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+async function writeHouseholdMetaReset(nextLastResetAt, timezone) {
+  const nowIso = new Date().toISOString();
+  await supabaseRequest(
+    `household_meta?id=eq.${encodeURIComponent(HOUSEHOLD_META_ID)}`,
+    {
+      method: "PATCH",
+      headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({
+        last_points_reset_at: nextLastResetAt,
+        timezone: timezone || DEFAULT_HOUSEHOLD_TIMEZONE,
+        updated_at: nowIso,
+      }),
+    },
+  ).catch(async () => {
+    await supabaseRequest("household_meta", {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify({
+        id: HOUSEHOLD_META_ID,
+        timezone: timezone || DEFAULT_HOUSEHOLD_TIMEZONE,
+        last_points_reset_at: nextLastResetAt,
+        updated_at: nowIso,
+      }),
+    });
+  });
+}
+
+/**
+ * Idempotent Sunday-night rollover (client-side for Pages).
+ * Snapshots current period totals into points_history, then advances
+ * last_points_reset_at so the live board = awards since that cursor.
+ */
+async function maybeWeeklyPointsResetRich(peopleList, completionList, metaRow) {
+  if (!metaRow) return { lastResetAt: null, history: pointsHistory };
+  householdTimezone =
+    (metaRow.timezone && String(metaRow.timezone).trim()) ||
+    DEFAULT_HOUSEHOLD_TIMEZONE;
+  const weekStartIso = currentWeekStartIso(householdTimezone);
+  const lastReset = metaRow.last_points_reset_at ?? null;
+  const periodLabel = periodLabelForWeekEnding(weekStartIso, householdTimezone);
+
+  if (!lastReset) {
+    const thisWeek = new Map(
+      computeScoreboard(peopleList, completionList, weekStartIso).map((r) => [
+        r.personId,
+        r.points,
+      ]),
+    );
+    const historyRows = computeScoreboard(peopleList, completionList, null)
+      .map((row) => ({
+        id: newId("ph"),
+        weekEnding: weekStartIso,
+        periodLabel: "Prior to weekly resets",
+        personId: row.personId,
+        displayName: row.displayName,
+        points: Math.max(0, row.points - (thisWeek.get(row.personId) ?? 0)),
+        createdAt: new Date().toISOString(),
+      }))
+      .filter((row) => row.points > 0);
+    try {
+      await upsertPointsHistoryRich(historyRows);
+      await writeHouseholdMetaReset(weekStartIso, householdTimezone);
+    } catch (error) {
+      console.warn("Weekly points seed skipped", error);
+      return { lastResetAt: null, history: await fetchPointsHistoryRich() };
+    }
+    return {
+      lastResetAt: weekStartIso,
+      history: await fetchPointsHistoryRich(),
+    };
+  }
+
+  const lastMs = Date.parse(lastReset);
+  const weekMs = Date.parse(weekStartIso);
+  if (Number.isNaN(lastMs) || Number.isNaN(weekMs) || lastMs >= weekMs) {
+    return {
+      lastResetAt: lastReset,
+      history: await fetchPointsHistoryRich(),
+    };
+  }
+
+  const sinceWeek = new Map(
+    computeScoreboard(peopleList, completionList, weekStartIso).map((r) => [
+      r.personId,
+      r.points,
+    ]),
+  );
+  const historyRows = computeScoreboard(
+    peopleList,
+    completionList,
+    lastReset,
+  )
+    .map((row) => ({
+      id: newId("ph"),
+      weekEnding: weekStartIso,
+      periodLabel,
+      personId: row.personId,
+      displayName: row.displayName,
+      points: Math.max(0, row.points - (sinceWeek.get(row.personId) ?? 0)),
+      createdAt: new Date().toISOString(),
+    }))
+    .filter((row) => row.points > 0);
+
+  try {
+    await upsertPointsHistoryRich(historyRows);
+    await writeHouseholdMetaReset(weekStartIso, householdTimezone);
+  } catch (error) {
+    console.warn("Weekly points reset skipped", error);
+    return {
+      lastResetAt: lastReset,
+      history: await fetchPointsHistoryRich(),
+    };
+  }
+  return {
+    lastResetAt: weekStartIso,
+    history: await fetchPointsHistoryRich(),
+  };
+}
+
 async function listRichSupabase(status) {
-  const [instanceRows, templateRows, peopleRows, completionRows] =
+  const [instanceRows, templateRows, peopleRows, completionRows, metaRow] =
     await Promise.all([
       supabaseRequest("task_instances?select=*&order=created_at.desc"),
       supabaseRequest("task_templates?select=*&order=created_at.desc"),
       supabaseRequest("people?select=*&order=display_name.asc"),
       supabaseRequest("completion_events?select=*&order=completed_at.desc"),
+      fetchHouseholdMetaRich(),
     ]);
   people = (peopleRows ?? []).map((row) => ({
     id: row.id,
@@ -960,7 +1276,11 @@ async function listRichSupabase(status) {
   }));
   templatesById = new Map((templateRows ?? []).map((row) => [row.id, row]));
   completions = completionRows ?? [];
-  scoreRows = computeScoreboard(people, completions);
+
+  const reset = await maybeWeeklyPointsResetRich(people, completions, metaRow);
+  lastPointsResetAt = reset.lastResetAt;
+  pointsHistory = reset.history;
+  scoreRows = computeScoreboard(people, completions, lastPointsResetAt);
 
   const promoted = await promoteDueWaitingRich(instanceRows);
   const released = await releaseExpiredClaimsRich(instanceRows);
@@ -1262,7 +1582,7 @@ async function updatePersonRole(personId, role) {
     people = people
       .map((p) => (p.id === personId ? { ...p, role } : p))
       .sort((a, b) => a.displayName.localeCompare(b.displayName));
-    scoreRows = computeScoreboard(people, completions);
+    scoreRows = computeScoreboard(people, completions, lastPointsResetAt);
     return;
   }
   if (backend === "local") {
@@ -1276,7 +1596,9 @@ async function updatePersonRole(personId, role) {
       displayName: p.displayName ?? p.display_name,
       role: p.role ?? "child",
     }));
-    scoreRows = computeScoreboard(people, store.completions);
+    const since =
+      store.householdMeta?.lastPointsResetAt ?? lastPointsResetAt;
+    scoreRows = computeScoreboard(people, store.completions, since);
     return;
   }
   throw new Error("Managing people needs rich Supabase or local mode.");
@@ -1544,6 +1866,15 @@ function loadLocalV2() {
         templates: Array.isArray(parsed.templates) ? parsed.templates : [],
         instances: Array.isArray(parsed.instances) ? parsed.instances : [],
         completions: Array.isArray(parsed.completions) ? parsed.completions : [],
+        pointsHistory: Array.isArray(parsed.pointsHistory)
+          ? mapHistoryRows(parsed.pointsHistory)
+          : [],
+        householdMeta: parsed.householdMeta ?? {
+          id: HOUSEHOLD_META_ID,
+          timezone: DEFAULT_HOUSEHOLD_TIMEZONE,
+          lastPointsResetAt: parsed.lastPointsResetAt ?? null,
+          updatedAt: new Date(0).toISOString(),
+        },
       };
     }
   } catch {
@@ -1552,7 +1883,19 @@ function loadLocalV2() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY_V1);
     if (!raw) {
-      return { people: [], templates: [], instances: [], completions: [] };
+      return {
+        people: [],
+        templates: [],
+        instances: [],
+        completions: [],
+        pointsHistory: [],
+        householdMeta: {
+          id: HOUSEHOLD_META_ID,
+          timezone: DEFAULT_HOUSEHOLD_TIMEZONE,
+          lastPointsResetAt: null,
+          updatedAt: new Date(0).toISOString(),
+        },
+      };
     }
     const parsed = JSON.parse(raw);
     const legacy = Array.isArray(parsed?.chores) ? parsed.chores : [];
@@ -1568,9 +1911,33 @@ function loadLocalV2() {
       template_id: null,
       source: "manual",
     }));
-    return { people: [], templates: [], instances, completions: [] };
+    return {
+      people: [],
+      templates: [],
+      instances,
+      completions: [],
+      pointsHistory: [],
+      householdMeta: {
+        id: HOUSEHOLD_META_ID,
+        timezone: DEFAULT_HOUSEHOLD_TIMEZONE,
+        lastPointsResetAt: null,
+        updatedAt: new Date(0).toISOString(),
+      },
+    };
   } catch {
-    return { people: [], templates: [], instances: [], completions: [] };
+    return {
+      people: [],
+      templates: [],
+      instances: [],
+      completions: [],
+      pointsHistory: [],
+      householdMeta: {
+        id: HOUSEHOLD_META_ID,
+        timezone: DEFAULT_HOUSEHOLD_TIMEZONE,
+        lastPointsResetAt: null,
+        updatedAt: new Date(0).toISOString(),
+      },
+    };
   }
 }
 
@@ -1634,8 +2001,116 @@ function promoteLocalWaiting(store) {
   return nextStore;
 }
 
+function applyLocalWeeklyPointsReset(store) {
+  const meta = store.householdMeta ?? {
+    id: HOUSEHOLD_META_ID,
+    timezone: DEFAULT_HOUSEHOLD_TIMEZONE,
+    lastPointsResetAt: null,
+    updatedAt: new Date(0).toISOString(),
+  };
+  householdTimezone =
+    (meta.timezone && String(meta.timezone).trim()) ||
+    DEFAULT_HOUSEHOLD_TIMEZONE;
+  const weekStartIso = currentWeekStartIso(householdTimezone);
+  const lastReset = meta.lastPointsResetAt ?? null;
+  const nowIso = new Date().toISOString();
+  const peopleList = (store.people ?? []).map((p) => ({
+    id: p.id,
+    displayName: p.displayName ?? p.display_name,
+    role: p.role ?? "child",
+  }));
+  const history = [...(store.pointsHistory ?? [])];
+
+  const pushHistory = (rows) => {
+    for (const row of rows) {
+      if (
+        history.some(
+          (h) => h.weekEnding === row.weekEnding && h.personId === row.personId,
+        )
+      ) {
+        continue;
+      }
+      history.push(row);
+    }
+  };
+
+  if (!lastReset) {
+    const thisWeek = new Map(
+      computeScoreboard(peopleList, store.completions, weekStartIso).map(
+        (r) => [r.personId, r.points],
+      ),
+    );
+    pushHistory(
+      computeScoreboard(peopleList, store.completions, null)
+        .map((row) => ({
+          id: newId("ph"),
+          weekEnding: weekStartIso,
+          periodLabel: "Prior to weekly resets",
+          personId: row.personId,
+          displayName: row.displayName,
+          points: Math.max(0, row.points - (thisWeek.get(row.personId) ?? 0)),
+          createdAt: nowIso,
+        }))
+        .filter((row) => row.points > 0),
+    );
+    const next = {
+      ...store,
+      pointsHistory: history,
+      householdMeta: {
+        ...meta,
+        timezone: householdTimezone,
+        lastPointsResetAt: weekStartIso,
+        updatedAt: nowIso,
+      },
+    };
+    saveLocalV2(next);
+    return next;
+  }
+
+  const lastMs = Date.parse(lastReset);
+  const weekMs = Date.parse(weekStartIso);
+  if (Number.isNaN(lastMs) || Number.isNaN(weekMs) || lastMs >= weekMs) {
+    return store;
+  }
+
+  const sinceWeek = new Map(
+    computeScoreboard(peopleList, store.completions, weekStartIso).map((r) => [
+      r.personId,
+      r.points,
+    ]),
+  );
+  const periodLabel = periodLabelForWeekEnding(weekStartIso, householdTimezone);
+  pushHistory(
+    computeScoreboard(peopleList, store.completions, lastReset)
+      .map((row) => ({
+        id: newId("ph"),
+        weekEnding: weekStartIso,
+        periodLabel,
+        personId: row.personId,
+        displayName: row.displayName,
+        points: Math.max(0, row.points - (sinceWeek.get(row.personId) ?? 0)),
+        createdAt: nowIso,
+      }))
+      .filter((row) => row.points > 0),
+  );
+  const next = {
+    ...store,
+    pointsHistory: history,
+    householdMeta: {
+      ...meta,
+      timezone: householdTimezone,
+      lastPointsResetAt: weekStartIso,
+      updatedAt: nowIso,
+    },
+  };
+  saveLocalV2(next);
+  return next;
+}
+
 function listLocal(status) {
-  let store = releaseLocalClaims(promoteLocalWaiting(loadLocalV2()));
+  let store = applyLocalWeeklyPointsReset(
+    releaseLocalClaims(promoteLocalWaiting(loadLocalV2())),
+  );
   people = store.people.map((p) => ({
     id: p.id,
     displayName: p.displayName ?? p.display_name,
@@ -1656,7 +2131,11 @@ function listLocal(status) {
     ]),
   );
   completions = store.completions;
-  scoreRows = computeScoreboard(people, completions);
+  pointsHistory = mapHistoryRows(store.pointsHistory ?? []);
+  lastPointsResetAt = store.householdMeta?.lastPointsResetAt ?? null;
+  householdTimezone =
+    store.householdMeta?.timezone?.trim() || DEFAULT_HOUSEHOLD_TIMEZONE;
+  scoreRows = computeScoreboard(people, completions, lastPointsResetAt);
   const views = store.instances.map((row) => {
     const normalized = {
       id: row.id,
@@ -1772,16 +2251,24 @@ function renderScoreboard() {
   emptyEl.classList.add("hidden");
   scoreboardEl.innerHTML = "";
   fillMeSelect();
+  const weekHint = lastPointsResetAt
+    ? " This week’s points (resets Sunday night)."
+    : "";
   summaryEl.textContent =
     scoreRows.length === 0
       ? "Add household people to start the scoreboard."
-      : "Points from approved completions.";
+      : `Approved points this week.${weekHint}`;
 
   if (scoreRows.length === 0) {
     emptyEl.textContent = "No people yet. Add someone under People.";
     emptyEl.classList.remove("hidden");
     return;
   }
+
+  const currentHeading = document.createElement("p");
+  currentHeading.className = "score-section-label";
+  currentHeading.textContent = "This week";
+  scoreboardEl.append(currentHeading);
 
   for (const row of scoreRows) {
     const item = document.createElement("div");
@@ -1800,6 +2287,40 @@ function renderScoreboard() {
     pts.setAttribute("aria-label", `${row.points} points`);
     item.append(left, pts);
     scoreboardEl.append(item);
+  }
+
+  const groups = groupHistoryByWeek(pointsHistory);
+  if (groups.length === 0) return;
+
+  const historyHeading = document.createElement("p");
+  historyHeading.className = "score-section-label score-history-heading";
+  historyHeading.textContent = "Past weeks";
+  scoreboardEl.append(historyHeading);
+
+  for (const group of groups) {
+    const block = document.createElement("div");
+    block.className = "score-history-week";
+    const label = document.createElement("p");
+    label.className = "score-history-label";
+    label.textContent = group.periodLabel;
+    block.append(label);
+    for (const row of group.rows) {
+      const item = document.createElement("div");
+      item.className = "score-row score-row-history";
+      const name = document.createElement("p");
+      name.className = "score-name";
+      name.textContent = row.displayName;
+      const pts = document.createElement("div");
+      pts.className = "score-points";
+      pts.textContent = String(row.points);
+      pts.setAttribute(
+        "aria-label",
+        `${row.displayName} ${row.points} points`,
+      );
+      item.append(name, pts);
+      block.append(item);
+    }
+    scoreboardEl.append(block);
   }
 }
 
@@ -2209,7 +2730,7 @@ async function loadChores({ quiet = false } = {}) {
   if (!quiet && (backend === "supabase" || backend === "supabase-rich")) {
     setStatus(
       backend === "supabase-rich"
-        ? "Synced (points + recurrence + assessment)."
+        ? "Synced (points + weekly reset + assessment)."
         : "Synced with Supabase.",
     );
   }
@@ -2321,7 +2842,14 @@ async function addHouseholdPerson(nameEl, roleEl) {
         displayName: p.displayName ?? p.display_name,
         role: p.role ?? "child",
       }));
-      scoreRows = computeScoreboard(people, store.completions);
+      lastPointsResetAt =
+        store.householdMeta?.lastPointsResetAt ?? lastPointsResetAt;
+      pointsHistory = mapHistoryRows(store.pointsHistory ?? []);
+      scoreRows = computeScoreboard(
+        people,
+        store.completions,
+        lastPointsResetAt,
+      );
     } else {
       setStatus("Adding people needs rich Supabase schema or local mode.");
       return;

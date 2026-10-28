@@ -25,14 +25,22 @@ This creates / updates:
 | `public.task_templates` | Kinds + **recurrence** (default periodic **4 weeks**) + **points** + steps + reference photo |
 | `public.task_instances` | Open / assigned / done / waiting work. `complete_by` holds an assignee until that time, then the task is released |
 | `public.completion_events` | Completions + proof photo TTL + **assessment** / **points_awarded** |
+| `public.household_meta` | Household timezone + **`last_points_reset_at`** (weekly scoreboard cursor) |
+| `public.points_history` | Closed-week scoreboard snapshots (person totals + period label) |
 | Storage bucket `chore-photos` | Reference (durable) + proof (TTL) images |
 
 **Re-run this SQL on School Compass** whenever schema columns change (safe to
-re-run). Latest additive column: `task_instances.complete_by` (timestamptz) —
-the assignee holds the task only until that time. Also present from earlier
-slices: `recurrence_interval`, `recurrence_unit`, `points` on templates;
+re-run). Latest additive objects: `household_meta` + `points_history` (Sunday-night
+weekly points reset). Also present: `task_instances.complete_by`;
+`recurrence_interval`, `recurrence_unit`, `points` on templates;
 `assessment_status`, `points_awarded`, `assessed_by_person_id`,
 `assessed_at` on completion events.
+
+**Scoreboard model:** current points = sum of approved `points_awarded` with
+award time ≥ `last_points_reset_at`. Completions are never deleted. On Sunday
+night (Monday 00:00 household TZ, default `Europe/London`), the Pages client
+snapshots totals into `points_history` then advances the cursor (idempotent
+across devices). pg_cron is optional — not required for v1.
 
 If the Storage bucket insert fails on your plan, create a **public** bucket named
 `chore-photos` in **Storage → New bucket** (5 MB, image MIME types).
@@ -64,7 +72,7 @@ reconciles with Supabase in the background.
 - **Assign with a complete-by time** — naming an assignee (New task or Edit) requires a complete-by date and time. Until then the task stays assigned to that person. After that time, if it is still not done, the app clears the assignee on load and when the page renders, and anyone can mark it done with the name picker.
 - **Edit any task** — **Edit** on a task card updates title, description, steps, points, recurrence, assignee, complete-by, kind, due date, reference photo.
 - **People** — **People** tab: add name + role (`parent` / `child` / `other`), list and change roles.
-- **Points** — point value is on the add form (not buried) and editable per task; **Scores** tab shows approved totals.
+- **Points** — point value is on the add form (not buried) and editable per task; **Scores** tab shows **this week’s** approved totals plus a simple **past weeks** history. Totals reset Sunday night after snapshotting into history.
 - **Fast load** — open tasks / scoreboard paint from a localStorage cache first, then revalidate against Supabase (stale-while-revalidate).
 - **Mark done** — tap the check on an open task → popup asks **who did it**, optional **in-page camera** evidence (fallback: photo library / `capture`), and optional how-long / how-hard. No separate “I’ll do it” claim step. Assign-by-name on add/edit still works; “I am …” pre-fills the name picker.
 - **Template steps** + **reference photo** — “what good looks like” on add/edit (camera helper available).

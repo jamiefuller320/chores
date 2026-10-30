@@ -5,6 +5,7 @@ import {
   DEFAULT_LEAF_MINUTES,
   DEFAULT_PERIODIC_INTERVAL,
   DEFAULT_PERIODIC_UNIT,
+  DEFAULT_PERSON_COLORS,
   DEFAULT_TASK_POINTS,
   HOUSEHOLD_META_ID,
   PROOF_PHOTO_TTL_DAYS,
@@ -15,6 +16,7 @@ export {
   DEFAULT_HOUSEHOLD_TIMEZONE,
   DEFAULT_PERIODIC_INTERVAL,
   DEFAULT_PERIODIC_UNIT,
+  DEFAULT_PERSON_COLORS,
   DEFAULT_TASK_POINTS,
   HOUSEHOLD_META_ID,
 };
@@ -32,7 +34,34 @@ export type Person = {
   role: PersonRole;
   active: boolean;
   createdAt: string;
+  /** Hex `#RRGGBB` used to tint the page when this person is “I am”. */
+  color?: string;
 };
+
+const HEX_COLOR_RE = /^#[0-9A-Fa-f]{6}$/;
+
+export function normalizePersonColor(
+  value: unknown,
+): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!HEX_COLOR_RE.test(trimmed)) return undefined;
+  return trimmed.toLowerCase();
+}
+
+export function pickDefaultPersonColor(existing: Person[]): string {
+  const used = new Set(
+    existing
+      .map((p) => normalizePersonColor(p.color))
+      .filter((c): c is string => Boolean(c)),
+  );
+  for (const candidate of DEFAULT_PERSON_COLORS) {
+    if (!used.has(candidate.toLowerCase())) return candidate.toLowerCase();
+  }
+  return DEFAULT_PERSON_COLORS[
+    existing.length % DEFAULT_PERSON_COLORS.length
+  ].toLowerCase();
+}
 
 export type TemplateKind = "daily" | "periodic" | "once";
 export type RecurrenceUnit = "day" | "week";
@@ -282,6 +311,7 @@ export function upsertPersonByName(
     role,
     active: true,
     createdAt: new Date().toISOString(),
+    color: pickDefaultPersonColor(store.people),
   };
   return {
     store: { ...store, people: [...store.people, person] },

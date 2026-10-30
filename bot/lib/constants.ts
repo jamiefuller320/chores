@@ -24,3 +24,18 @@ export const DEFAULT_HOUSEHOLD_TIMEZONE = "Europe/London";
 
 /** Singleton row id for `household_meta`. */
 export const HOUSEHOLD_META_ID = "default";
+
+/**
+ * Soft mid-tone hex colours for household identity tinting.
+ * Assigned in order when a person has no stored colour yet.
+ */
+export const DEFAULT_PERSON_COLORS = [
+  "#3d8b6e",
+  "#c46b3a",
+  "#3a7ca5",
+  "#b85c7a",
+  "#8a7a3d",
+  "#2e8b8b",
+  "#c49a3a",
+  "#6d7f9c",
+] as const;

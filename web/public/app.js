@@ -106,6 +106,19 @@ const DEFAULT_DAYS_AFTER_INTERVAL = 7;
 const DEFAULT_TASK_POINTS = 1;
 const DEFAULT_HOUSEHOLD_TIMEZONE = "Europe/London";
 const HOUSEHOLD_META_ID = "default";
+/** Soft mid-tone identity colours (page background when “I am” is set). */
+const DEFAULT_PERSON_COLORS = [
+  "#3d8b6e",
+  "#c46b3a",
+  "#3a7ca5",
+  "#b85c7a",
+  "#8a7a3d",
+  "#2e8b8b",
+  "#c49a3a",
+  "#6d7f9c",
+];
+const HEX_COLOR_RE = /^#[0-9A-Fa-f]{6}$/;
+const DEFAULT_THEME_COLOR = "#1f6f5b";
 /**
  * v1 product default: treat the Pages UI as full parent/admin mode.
  * Real logins + password-reset authority come later (see chore-model-plan).
@@ -117,7 +130,7 @@ let filter = "open";
 const recentCreates = new Map();
 /** @type {Array<Record<string, unknown>>} */
 let chores = [];
-/** @type {Array<{id: string, displayName: string, role: string}>} */
+/** @type {Array<{id: string, displayName: string, role: string, color: string}>} */
 let people = [];
 /** @type {Map<string, Record<string, unknown>>} */
 let templatesById = new Map();
@@ -430,6 +443,64 @@ function currentPerson() {
   return people.find((p) => p.id === id) ?? null;
 }
 
+function normalizePersonColor(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!HEX_COLOR_RE.test(trimmed)) return null;
+  return trimmed.toLowerCase();
+}
+
+function pickDefaultPersonColor(existing = people) {
+  const used = new Set(
+    (existing || [])
+      .map((p) => normalizePersonColor(p.color))
+      .filter(Boolean),
+  );
+  for (const candidate of DEFAULT_PERSON_COLORS) {
+    if (!used.has(candidate.toLowerCase())) return candidate.toLowerCase();
+  }
+  return DEFAULT_PERSON_COLORS[
+    (existing?.length || 0) % DEFAULT_PERSON_COLORS.length
+  ].toLowerCase();
+}
+
+function defaultColorForId(personId) {
+  const id = String(personId || "");
+  let hash = 0;
+  for (let i = 0; i < id.length; i += 1) {
+    hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
+  }
+  return DEFAULT_PERSON_COLORS[hash % DEFAULT_PERSON_COLORS.length].toLowerCase();
+}
+
+function toPersonView(row) {
+  if (!row || typeof row !== "object") return null;
+  const id = String(row.id);
+  const color =
+    normalizePersonColor(row.color) || defaultColorForId(id);
+  return {
+    id,
+    displayName: row.displayName ?? row.display_name,
+    role: row.role ?? "child",
+    color,
+  };
+}
+
+function syncIdentityBackground() {
+  const person = currentPerson();
+  const color = person ? normalizePersonColor(person.color) || person.color : null;
+  const themeMeta = document.querySelector('meta[name="theme-color"]');
+  if (!color) {
+    document.body.classList.remove("has-identity-tint");
+    document.body.style.removeProperty("--identity-color");
+    if (themeMeta) themeMeta.setAttribute("content", DEFAULT_THEME_COLOR);
+    return;
+  }
+  document.body.classList.add("has-identity-tint");
+  document.body.style.setProperty("--identity-color", color);
+  if (themeMeta) themeMeta.setAttribute("content", color);
+}
+
 function isAdmin() {
   // Full admin UI for now; later gate on parent login / Auth.
   if (ADMIN_UI_MODE) return true;
@@ -484,7 +555,9 @@ function writeSwrCache() {
 function paintFromSwrCache() {
   const cached = readSwrCache();
   if (!cached) return false;
-  people = Array.isArray(cached.people) ? cached.people : [];
+  people = Array.isArray(cached.people)
+    ? cached.people.map((p) => toPersonView(p)).filter(Boolean)
+    : [];
   scoreRows = Array.isArray(cached.scoreRows) ? cached.scoreRows : [];
   pointsHistory = Array.isArray(cached.pointsHistory)
     ? mapHistoryRows(cached.pointsHistory)
@@ -1525,11 +1598,9 @@ async function fetchRichBoard(status) {
       supabaseRequest("completion_events?select=*&order=completed_at.desc"),
       fetchHouseholdMetaRich(),
     ]);
-  const nextPeople = (peopleRows ?? []).map((row) => ({
-    id: row.id,
-    displayName: row.display_name,
-    role: row.role,
-  }));
+  const nextPeople = (peopleRows ?? [])
+    .map((row) => toPersonView(row))
+    .filter(Boolean);
   const nextTemplates = new Map(
     (templateRows ?? []).map((row) => [row.id, row]),
   );
@@ -1618,6 +1689,7 @@ async function findOrCreatePerson(name, role = "child") {
   if (existing) return existing;
   if (backend === "supabase-rich") {
     const id = newId("person");
+    const color = pickDefaultPersonColor(people);
     const rows = await supabaseRequest("people", {
       method: "POST",
       headers: { Prefer: "return=representation" },
@@ -1625,15 +1697,12 @@ async function findOrCreatePerson(name, role = "child") {
         id,
         display_name: trimmed,
         role: role || "child",
+        color,
         active: true,
         created_at: new Date().toISOString(),
       }),
     });
-    const person = {
-      id: rows[0].id,
-      displayName: rows[0].display_name,
-      role: rows[0].role,
-    };
+    const person = toPersonView(rows[0]);
     people = [...people, person].sort((a, b) =>
       a.displayName.localeCompare(b.displayName),
     );
@@ -1643,6 +1712,7 @@ async function findOrCreatePerson(name, role = "child") {
     id: newId("person"),
     displayName: trimmed,
     role: role || "child",
+    color: pickDefaultPersonColor(people),
   };
   people = [...people, person];
   return person;
@@ -1915,14 +1985,38 @@ async function updatePersonRole(personId, role) {
     if (index < 0) throw new Error("Person not found");
     store.people[index] = { ...store.people[index], role };
     saveLocalV2(store);
-    people = store.people.map((p) => ({
-      id: p.id,
-      displayName: p.displayName ?? p.display_name,
-      role: p.role ?? "child",
-    }));
+    people = store.people.map((p) => toPersonView(p)).filter(Boolean);
     const since =
       store.householdMeta?.lastPointsResetAt ?? lastPointsResetAt;
     scoreRows = computeScoreboard(people, store.completions, since);
+    return;
+  }
+  throw new Error("Managing people needs rich Supabase or local mode.");
+}
+
+async function updatePersonColor(personId, colorRaw) {
+  const color = normalizePersonColor(colorRaw);
+  if (!color) throw new Error("Colour must be a hex value like #3d8b6e.");
+  if (backend === "supabase-rich") {
+    await supabaseRequest(`people?id=eq.${encodeURIComponent(personId)}`, {
+      method: "PATCH",
+      headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({ color }),
+    });
+    people = people
+      .map((p) => (p.id === personId ? { ...p, color } : p))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
+    syncIdentityBackground();
+    return;
+  }
+  if (backend === "local") {
+    const store = loadLocalV2();
+    const index = store.people.findIndex((p) => p.id === personId);
+    if (index < 0) throw new Error("Person not found");
+    store.people[index] = { ...store.people[index], color };
+    saveLocalV2(store);
+    people = store.people.map((p) => toPersonView(p)).filter(Boolean);
+    syncIdentityBackground();
     return;
   }
   throw new Error("Managing people needs rich Supabase or local mode.");
@@ -2338,11 +2432,9 @@ function applyLocalWeeklyPointsReset(store) {
   const weekStartIso = currentWeekStartIso(householdTimezone);
   const lastReset = meta.lastPointsResetAt ?? null;
   const nowIso = new Date().toISOString();
-  const peopleList = (store.people ?? []).map((p) => ({
-    id: p.id,
-    displayName: p.displayName ?? p.display_name,
-    role: p.role ?? "child",
-  }));
+  const peopleList = (store.people ?? [])
+    .map((p) => toPersonView(p))
+    .filter(Boolean);
   const history = [...(store.pointsHistory ?? [])];
 
   const pushHistory = (rows) => {
@@ -2435,11 +2527,7 @@ function listLocal(status) {
   let store = applyLocalWeeklyPointsReset(
     releaseLocalClaims(promoteLocalWaiting(loadLocalV2())),
   );
-  people = store.people.map((p) => ({
-    id: p.id,
-    displayName: p.displayName ?? p.display_name,
-    role: p.role ?? "child",
-  }));
+  people = store.people.map((p) => toPersonView(p)).filter(Boolean);
   templatesById = new Map(
     store.templates.map((t) => [
       t.id,
@@ -2558,6 +2646,7 @@ function fillMeSelect() {
     meSelect.value = previous;
   }
   syncComposerAdminUi();
+  syncIdentityBackground();
 }
 
 function roleLabel(role) {
@@ -2715,10 +2804,31 @@ function renderPeoplePanel() {
     const li = document.createElement("li");
     li.className = "people-row";
     const left = document.createElement("div");
+    left.className = "people-name-line";
+    const color = document.createElement("input");
+    color.type = "color";
+    color.className = "people-color";
+    color.value = normalizePersonColor(person.color) || defaultColorForId(person.id);
+    color.setAttribute("aria-label", `Colour for ${person.displayName}`);
+    color.title = "Page colour when this person is selected in I am";
+    color.addEventListener("change", () => {
+      void (async () => {
+        const previous = person.color;
+        try {
+          await updatePersonColor(person.id, color.value);
+          setStatus(`Updated colour for ${person.displayName}.`);
+          writeSwrCache();
+          fillMeSelect();
+        } catch (error) {
+          setStatus(error.message);
+          color.value = previous || defaultColorForId(person.id);
+        }
+      })();
+    });
     const name = document.createElement("p");
     name.className = "people-name";
     name.textContent = person.displayName;
-    left.append(name);
+    left.append(color, name);
     const role = document.createElement("select");
     role.setAttribute("aria-label", `Role for ${person.displayName}`);
     for (const [value, label] of [
@@ -3210,34 +3320,36 @@ async function ensureMePerson() {
         id: newId("person"),
         displayName: name,
         role: "child",
+        color: pickDefaultPersonColor(
+          store.people.map((p) => toPersonView(p)).filter(Boolean),
+        ),
         active: true,
         createdAt: new Date().toISOString(),
       };
       store.people.push(person);
       saveLocalV2(store);
     }
-    people = store.people.map((p) => ({
-      id: p.id,
-      displayName: p.displayName ?? p.display_name,
-      role: p.role ?? "child",
-    }));
+    people = store.people.map((p) => toPersonView(p)).filter(Boolean);
     fillMeSelect();
     meSelect.value = person.id;
     localStorage.setItem(ME_KEY, person.id);
     syncComposerAdminUi();
-    return {
-      id: person.id,
-      displayName: person.displayName ?? person.display_name,
-      role: person.role ?? "child",
-    };
+    syncIdentityBackground();
+    return toPersonView(person);
   }
 
-  const person = { id: newId("person"), displayName: name, role: "child" };
+  const person = {
+    id: newId("person"),
+    displayName: name,
+    role: "child",
+    color: pickDefaultPersonColor(people),
+  };
   people = [...people.filter((p) => p.displayName !== name), person];
   fillMeSelect();
   meSelect.value = person.id;
   localStorage.setItem(ME_KEY, person.id);
   syncComposerAdminUi();
+  syncIdentityBackground();
   return person;
 }
 
@@ -3276,16 +3388,15 @@ async function addHouseholdPerson(nameEl, roleEl) {
           id: newId("person"),
           displayName: name,
           role,
+          color: pickDefaultPersonColor(
+            store.people.map((p) => toPersonView(p)).filter(Boolean),
+          ),
           active: true,
           createdAt: new Date().toISOString(),
         });
       }
       saveLocalV2(store);
-      people = store.people.map((p) => ({
-        id: p.id,
-        displayName: p.displayName ?? p.display_name,
-        role: p.role ?? "child",
-      }));
+      people = store.people.map((p) => toPersonView(p)).filter(Boolean);
       lastPointsResetAt =
         store.householdMeta?.lastPointsResetAt ?? lastPointsResetAt;
       pointsHistory = mapHistoryRows(store.pointsHistory ?? []);
@@ -4040,6 +4151,7 @@ editAssigneeInput?.addEventListener("input", () => {
 meSelect.addEventListener("change", () => {
   localStorage.setItem(ME_KEY, meSelect.value);
   syncComposerAdminUi();
+  syncIdentityBackground();
   render();
 });
 

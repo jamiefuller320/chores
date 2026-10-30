@@ -18,6 +18,11 @@ const kindInput = document.querySelector("#kind");
 const recurrenceFields = document.querySelector("#recurrence-fields");
 const recurrenceIntervalInput = document.querySelector("#recurrenceInterval");
 const recurrenceUnitInput = document.querySelector("#recurrenceUnit");
+const recurrenceIntervalLabel = document.querySelector(
+  "#recurrence-interval-label",
+);
+const recurrenceUnitText = document.querySelector("#recurrence-unit-text");
+const recurrenceHint = document.querySelector("#recurrence-hint");
 const pointsFields = document.querySelector("#points-fields");
 const pointsInput = document.querySelector("#points");
 const stepsInput = document.querySelector("#steps");
@@ -59,6 +64,13 @@ const editKindInput = document.querySelector("#edit-kind");
 const editRecurrenceFields = document.querySelector("#edit-recurrence-fields");
 const editRecurrenceIntervalInput = document.querySelector("#edit-recurrenceInterval");
 const editRecurrenceUnitInput = document.querySelector("#edit-recurrenceUnit");
+const editRecurrenceIntervalLabel = document.querySelector(
+  "#edit-recurrence-interval-label",
+);
+const editRecurrenceUnitText = document.querySelector(
+  "#edit-recurrence-unit-text",
+);
+const editRecurrenceHint = document.querySelector("#edit-recurrence-hint");
 const editPointsInput = document.querySelector("#edit-points");
 const editDueDateInput = document.querySelector("#edit-dueDate");
 const editStepsInput = document.querySelector("#edit-steps");
@@ -88,6 +100,8 @@ const PROOF_TTL_DAYS = 7;
 const PHOTO_BUCKET = "chore-photos";
 const DEFAULT_PERIODIC_INTERVAL = 4;
 const DEFAULT_PERIODIC_UNIT = "week";
+/** Sensible starting N for the explicit “every N days after done” path. */
+const DEFAULT_DAYS_AFTER_INTERVAL = 7;
 const DEFAULT_TASK_POINTS = 1;
 const DEFAULT_HOUSEHOLD_TIMEZONE = "Europe/London";
 const HOUSEHOLD_META_ID = "default";
@@ -98,6 +112,8 @@ const HOUSEHOLD_META_ID = "default";
 const ADMIN_UI_MODE = true;
 
 let filter = "open";
+/** Recently created chores kept visible across brief Supabase read-after-write races. */
+const recentCreates = new Map();
 /** @type {Array<Record<string, unknown>>} */
 let chores = [];
 /** @type {Array<{id: string, displayName: string, role: string}>} */
@@ -281,13 +297,14 @@ async function flushReleasedClaims() {
     if (backend === "supabase-rich") {
       await Promise.all(
         ids.map((id) =>
-          supabaseRequest(
+          supabaseWriteOmittingUnknownColumns(
             `task_instances?id=eq.${encodeURIComponent(id)}&status=eq.assigned`,
             {
               method: "PATCH",
               headers: { Prefer: "return=minimal" },
               body: JSON.stringify(patch),
             },
+            ["complete_by"],
           ).catch(() => null),
         ),
       );
@@ -678,15 +695,54 @@ function resolveRecurrence(kind, interval, unit) {
     return { recurrenceInterval: 1, recurrenceUnit: "day", cooldownDays: 1 };
   }
   const resolvedUnit = unit || DEFAULT_PERIODIC_UNIT;
+  const fallbackInterval =
+    resolvedUnit === "day"
+      ? DEFAULT_DAYS_AFTER_INTERVAL
+      : DEFAULT_PERIODIC_INTERVAL;
   const resolvedInterval =
     interval !== undefined && Number(interval) > 0
       ? Math.floor(Number(interval))
-      : DEFAULT_PERIODIC_INTERVAL;
+      : fallbackInterval;
   return {
     recurrenceInterval: resolvedInterval,
     recurrenceUnit: resolvedUnit,
     cooldownDays: resolvedInterval * (resolvedUnit === "week" ? 7 : 1),
   };
+}
+
+/**
+ * UI kind → stored template kind + recurrence.
+ * `days_after` is the explicit “every N days after done” path (periodic + day).
+ * `periodic` in the UI means weekly cadence (default every 4 weeks).
+ */
+function resolveKindSelection(uiKind, interval, unit) {
+  if (uiKind === "days_after") {
+    const recurrence = resolveRecurrence(
+      "periodic",
+      interval || DEFAULT_DAYS_AFTER_INTERVAL,
+      "day",
+    );
+    return { kind: "periodic", ...recurrence, uiKind: "days_after" };
+  }
+  if (uiKind === "periodic") {
+    const recurrence = resolveRecurrence(
+      "periodic",
+      interval || DEFAULT_PERIODIC_INTERVAL,
+      "week",
+    );
+    return { kind: "periodic", ...recurrence, uiKind: "periodic" };
+  }
+  const kind = uiKind || "once";
+  return { kind, ...resolveRecurrence(kind, interval, unit), uiKind: kind };
+}
+
+/** Map a stored template back to the composer/edit select value. */
+function uiKindFromStored(kind, interval, unit) {
+  if (kind === "periodic" && (unit || DEFAULT_PERIODIC_UNIT) === "day") {
+    return "days_after";
+  }
+  if (kind === "periodic") return "periodic";
+  return kind || "once";
 }
 
 function formatRecurrenceLabel(kind, interval, unit) {
@@ -696,7 +752,66 @@ function formatRecurrenceLabel(kind, interval, unit) {
   const n = resolved.recurrenceInterval ?? DEFAULT_PERIODIC_INTERVAL;
   const u = resolved.recurrenceUnit ?? DEFAULT_PERIODIC_UNIT;
   if (u === "week") return n === 1 ? "Every week" : `Every ${n} weeks`;
-  return n === 1 ? "Every day" : `Every ${n} days`;
+  return n === 1 ? "Every day after done" : `Every ${n} days after done`;
+}
+
+/** Drop null/undefined keys so PostgREST won’t reject unknown optional columns. */
+function omitNullish(obj) {
+  const out = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (value !== null && value !== undefined) out[key] = value;
+  }
+  return out;
+}
+
+function isMissingColumnError(error, column) {
+  const message = String(error?.message || error || "");
+  return (
+    /PGRST204/i.test(message) ||
+    (column
+      ? new RegExp(`Could not find the '${column}' column`, "i").test(message)
+      : /Could not find the '[^']+' column/i.test(message))
+  );
+}
+
+/**
+ * PATCH/POST helper: if PostgREST rejects an optional column (e.g. complete_by
+ * not yet migrated), retry once without that key.
+ */
+async function supabaseWriteOmittingUnknownColumns(
+  path,
+  options,
+  optionalColumns = ["complete_by"],
+) {
+  try {
+    return await supabaseRequest(path, options);
+  } catch (error) {
+    const bodyRaw = options.body;
+    if (typeof bodyRaw !== "string") throw error;
+    let parsed;
+    try {
+      parsed = JSON.parse(bodyRaw);
+    } catch {
+      throw error;
+    }
+    const drop = optionalColumns.filter(
+      (col) =>
+        Object.prototype.hasOwnProperty.call(parsed, col) &&
+        isMissingColumnError(error, col),
+    );
+    if (drop.length === 0) throw error;
+    const next = { ...parsed };
+    for (const col of drop) delete next[col];
+    if (Object.keys(next).length === Object.keys(parsed).length) throw error;
+    console.warn(
+      `Supabase missing column(s) ${drop.join(", ")}; retrying without them. Run schema.sql alter for complete_by.`,
+      error,
+    );
+    return supabaseRequest(path, {
+      ...options,
+      body: JSON.stringify(next),
+    });
+  }
 }
 
 function nextDueAt(completedAtIso, kind, interval, unit) {
@@ -865,16 +980,64 @@ function groupHistoryByWeek(rows) {
     .sort((a, b) => Date.parse(b.weekEnding) - Date.parse(a.weekEnding));
 }
 
-function syncComposerAdminUi() {
+function paintRecurrenceFields(uiKind, {
+  intervalInput,
+  unitInput,
+  fieldsEl,
+  labelEl,
+  unitTextEl,
+  hintEl,
+  applyDefaultInterval = false,
+} = {}) {
+  const show = uiKind === "periodic" || uiKind === "days_after";
+  fieldsEl?.classList.toggle("hidden", !show);
+  if (!show) return;
+  if (uiKind === "days_after") {
+    if (unitInput) unitInput.value = "day";
+    if (applyDefaultInterval && intervalInput) {
+      intervalInput.value = String(DEFAULT_DAYS_AFTER_INTERVAL);
+    }
+    if (labelEl) labelEl.textContent = "Every";
+    if (unitTextEl) unitTextEl.textContent = "days after done";
+    if (hintEl) {
+      hintEl.textContent =
+        "Comes back N days after the last completion (cooldown).";
+    }
+  } else {
+    if (unitInput) unitInput.value = "week";
+    if (applyDefaultInterval && intervalInput) {
+      intervalInput.value = String(DEFAULT_PERIODIC_INTERVAL);
+    }
+    if (labelEl) labelEl.textContent = "Every";
+    if (unitTextEl) unitTextEl.textContent = "weeks";
+    if (hintEl) {
+      hintEl.textContent = "Default for weekly repeats is every 4 weeks.";
+    }
+  }
+}
+
+function syncComposerAdminUi({ applyDefaultInterval = false } = {}) {
   pointsFields.classList.remove("hidden");
   adminHint.classList.toggle("hidden", !ADMIN_UI_MODE && !isAdmin());
-  const periodic = kindInput.value === "periodic";
-  recurrenceFields.classList.toggle("hidden", !periodic);
+  paintRecurrenceFields(kindInput.value, {
+    intervalInput: recurrenceIntervalInput,
+    unitInput: recurrenceUnitInput,
+    fieldsEl: recurrenceFields,
+    labelEl: recurrenceIntervalLabel,
+    unitTextEl: recurrenceUnitText,
+    hintEl: recurrenceHint,
+    applyDefaultInterval,
+  });
   if (editKindInput) {
-    editRecurrenceFields.classList.toggle(
-      "hidden",
-      editKindInput.value !== "periodic",
-    );
+    paintRecurrenceFields(editKindInput.value, {
+      intervalInput: editRecurrenceIntervalInput,
+      unitInput: editRecurrenceUnitInput,
+      fieldsEl: editRecurrenceFields,
+      labelEl: editRecurrenceIntervalLabel,
+      unitTextEl: editRecurrenceUnitText,
+      hintEl: editRecurrenceHint,
+      applyDefaultInterval,
+    });
   }
   syncCompleteByFields();
 }
@@ -1060,7 +1223,7 @@ async function releaseExpiredClaimsRich(instanceRows) {
   });
   await Promise.all(
     due.map((row) =>
-      supabaseRequest(
+      supabaseWriteOmittingUnknownColumns(
         `task_instances?id=eq.${encodeURIComponent(row.id)}&status=neq.done`,
         {
           method: "PATCH",
@@ -1074,6 +1237,7 @@ async function releaseExpiredClaimsRich(instanceRows) {
             opened_at: nowIso,
           }),
         },
+        ["complete_by"],
       ).catch(() => null),
     ),
   );
@@ -1372,62 +1536,84 @@ async function addRichSupabase(input) {
   const description = input.description?.trim() || null;
   const templateId = newId("tmpl");
   const instanceId = newId("inst");
+  const templateBody = omitNullish({
+    id: templateId,
+    title: input.title.trim(),
+    description,
+    kind,
+    cooldown_days: recurrence.cooldownDays ?? null,
+    recurrence_interval: recurrence.recurrenceInterval ?? null,
+    recurrence_unit: recurrence.recurrenceUnit ?? null,
+    points,
+    estimated_minutes: 10,
+    effort_weight: 1,
+    steps: input.steps ?? [],
+    reference_photo_path: referencePath,
+    default_assignee_person_id: person?.id ?? null,
+    created_from: "manual",
+    active: true,
+    created_at: now,
+  });
   await supabaseRequest("task_templates", {
     method: "POST",
     headers: { Prefer: "return=minimal" },
-    body: JSON.stringify({
-      id: templateId,
-      title: input.title.trim(),
-      description,
-      kind,
-      cooldown_days: recurrence.cooldownDays ?? null,
-      recurrence_interval: recurrence.recurrenceInterval ?? null,
-      recurrence_unit: recurrence.recurrenceUnit ?? null,
-      points,
-      estimated_minutes: 10,
-      effort_weight: 1,
-      steps: input.steps ?? [],
-      reference_photo_path: referencePath,
-      default_assignee_person_id: person?.id ?? null,
-      created_from: "manual",
-      active: true,
-      created_at: now,
-    }),
+    body: JSON.stringify(templateBody),
   });
-  const rows = await supabaseRequest("task_instances", {
-    method: "POST",
-    headers: { Prefer: "return=representation" },
-    body: JSON.stringify({
-      id: instanceId,
-      template_id: templateId,
-      title: input.title.trim(),
-      description,
-      estimated_minutes: 10,
-      status: person ? "assigned" : "open",
-      assignee_person_id: person?.id ?? null,
-      assignee: person?.displayName ?? null,
-      opened_at: now,
-      assigned_at: person ? now : null,
-      due_date: input.dueDate || null,
-      complete_by: person && input.completeBy ? input.completeBy : null,
-      source: "manual",
-      created_at: now,
-    }),
+  // Never send complete_by: null — live DBs that have not applied the
+  // additive alter reject unknown columns (PGRST204) and Add appears broken.
+  const instanceBody = omitNullish({
+    id: instanceId,
+    template_id: templateId,
+    title: input.title.trim(),
+    description,
+    estimated_minutes: 10,
+    status: person ? "assigned" : "open",
+    assignee_person_id: person?.id ?? null,
+    assignee: person?.displayName ?? null,
+    opened_at: now,
+    assigned_at: person ? now : null,
+    due_date: input.dueDate || null,
+    complete_by: person && input.completeBy ? input.completeBy : undefined,
+    source: "manual",
+    created_at: now,
   });
+  let rows;
+  try {
+    rows = await supabaseWriteOmittingUnknownColumns(
+      "task_instances",
+      {
+        method: "POST",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify(instanceBody),
+      },
+      ["complete_by"],
+    );
+  } catch (error) {
+    await supabaseRequest(
+      `task_templates?id=eq.${encodeURIComponent(templateId)}`,
+      { method: "DELETE", headers: { Prefer: "return=minimal" } },
+    ).catch(() => null);
+    throw error;
+  }
+  if (!rows?.length) {
+    throw new Error("Task was not created — empty response from Supabase.");
+  }
   try {
     await supabaseRequest("chores", {
       method: "POST",
       headers: { Prefer: "return=minimal" },
-      body: JSON.stringify({
-        id: instanceId,
-        title: input.title.trim(),
-        description,
-        assignee: person?.displayName ?? null,
-        status: "open",
-        due_date: input.dueDate || null,
-        created_at: now,
-        completed_at: null,
-      }),
+      body: JSON.stringify(
+        omitNullish({
+          id: instanceId,
+          title: input.title.trim(),
+          description,
+          assignee: person?.displayName ?? null,
+          status: "open",
+          due_date: input.dueDate || null,
+          created_at: now,
+          completed_at: null,
+        }),
+      ),
     });
   } catch {
     /* legacy mirror optional */
@@ -1527,24 +1713,28 @@ async function updateRichTask(chore, input) {
       instancePatch.assignee_person_id = person.id;
       instancePatch.assignee = person.displayName;
       instancePatch.assigned_at = now;
-      instancePatch.complete_by = input.completeBy;
+      // Only send complete_by when set — avoids PGRST204 on unmigrated DBs.
+      if (input.completeBy) instancePatch.complete_by = input.completeBy;
     } else {
       instancePatch.status =
         chore.instanceStatus === "noticed" ? "noticed" : "open";
       instancePatch.assignee_person_id = null;
       instancePatch.assignee = null;
       instancePatch.assigned_at = null;
-      instancePatch.complete_by = null;
+      if (chore.completeBy || chore.complete_by) {
+        instancePatch.complete_by = null;
+      }
     }
   }
 
-  const rows = await supabaseRequest(
+  const rows = await supabaseWriteOmittingUnknownColumns(
     `task_instances?id=eq.${encodeURIComponent(chore.id)}`,
     {
       method: "PATCH",
       headers: { Prefer: "return=representation" },
       body: JSON.stringify(instancePatch),
     },
+    ["complete_by"],
   );
   if (!rows?.length) throw new Error(`No task with id ${chore.id}`);
 
@@ -1637,7 +1827,7 @@ async function selfAssignRich(chore) {
   const person = people.find((p) => p.id === meId);
   if (!person) throw new Error("Unknown person — refresh and try again.");
   const now = new Date().toISOString();
-  const rows = await supabaseRequest(
+  const rows = await supabaseWriteOmittingUnknownColumns(
     `task_instances?id=eq.${encodeURIComponent(chore.id)}`,
     {
       method: "PATCH",
@@ -1647,9 +1837,9 @@ async function selfAssignRich(chore) {
         assignee_person_id: person.id,
         assignee: person.displayName,
         assigned_at: now,
-        complete_by: null,
       }),
     },
+    ["complete_by"],
   );
   if (!rows?.length) throw new Error(`No task with id ${chore.id}`);
   try {
@@ -2707,6 +2897,39 @@ function setComposerOpen(open) {
   }
 }
 
+function rememberCreatedChore(chore) {
+  if (!chore?.id) return;
+  recentCreates.set(String(chore.id), {
+    chore,
+    until: Date.now() + 20000,
+  });
+}
+
+function mergeRecentCreatesIntoList() {
+  const now = Date.now();
+  for (const [id, entry] of [...recentCreates.entries()]) {
+    if (!entry || entry.until < now) {
+      recentCreates.delete(id);
+      continue;
+    }
+    if (chores.some((c) => String(c.id) === id)) {
+      recentCreates.delete(id);
+      continue;
+    }
+    if (filter === "open" || filter === "all") {
+      const status = entry.chore.instanceStatus || entry.chore.status;
+      const openLike =
+        status === "noticed" ||
+        status === "open" ||
+        status === "assigned" ||
+        (entry.chore.status === "open" && !entry.chore.instanceStatus);
+      if (filter === "all" || openLike) {
+        chores = [entry.chore, ...chores];
+      }
+    }
+  }
+}
+
 async function loadChores({ quiet = false } = {}) {
   if (backend === "supabase-rich") {
     chores = await listRichSupabase(filter === "people" ? "all" : filter);
@@ -2724,6 +2947,7 @@ async function loadChores({ quiet = false } = {}) {
   } else {
     chores = listLocal(filter === "people" ? "all" : filter);
   }
+  mergeRecentCreatesIntoList();
   paintedFromCache = false;
   writeSwrCache();
   render();
@@ -2880,12 +3104,23 @@ function openEditDialog(chore) {
   if (editCompleteByInput) {
     editCompleteByInput.value = completeByToLocalInput(chore.completeBy);
   }
-  editKindInput.value = chore.kind || "once";
+  const uiKind = uiKindFromStored(
+    chore.kind,
+    chore.recurrenceInterval,
+    chore.recurrenceUnit,
+  );
+  editKindInput.value = uiKind;
+  const fallbackInterval =
+    uiKind === "days_after"
+      ? DEFAULT_DAYS_AFTER_INTERVAL
+      : DEFAULT_PERIODIC_INTERVAL;
   editRecurrenceIntervalInput.value = String(
-    chore.recurrenceInterval || DEFAULT_PERIODIC_INTERVAL,
+    chore.recurrenceInterval || fallbackInterval,
   );
   editRecurrenceUnitInput.value =
-    chore.recurrenceUnit || DEFAULT_PERIODIC_UNIT;
+    uiKind === "days_after"
+      ? "day"
+      : chore.recurrenceUnit || DEFAULT_PERIODIC_UNIT;
   editPointsInput.value = String(
     chore.points ?? DEFAULT_TASK_POINTS,
   );
@@ -2904,10 +3139,9 @@ function openEditDialog(chore) {
 }
 
 function collectEditPayload() {
-  const kind = editKindInput.value || "once";
-  const recurrence = resolveRecurrence(
-    kind,
-    Number(editRecurrenceIntervalInput.value) || DEFAULT_PERIODIC_INTERVAL,
+  const selected = resolveKindSelection(
+    editKindInput.value || "once",
+    Number(editRecurrenceIntervalInput.value) || undefined,
     editRecurrenceUnitInput.value || DEFAULT_PERIODIC_UNIT,
   );
   return {
@@ -2915,9 +3149,9 @@ function collectEditPayload() {
     description: editDescriptionInput.value.trim() || undefined,
     assignee: editAssigneeInput.value.trim() || undefined,
     completeBy: completeByFromLocalInput(editCompleteByInput?.value),
-    kind,
-    recurrenceInterval: recurrence.recurrenceInterval,
-    recurrenceUnit: recurrence.recurrenceUnit,
+    kind: selected.kind,
+    recurrenceInterval: selected.recurrenceInterval,
+    recurrenceUnit: selected.recurrenceUnit,
     points: Math.max(
       0,
       Math.floor(Number(editPointsInput.value) || DEFAULT_TASK_POINTS),
@@ -3538,11 +3772,11 @@ meSelect.addEventListener("change", () => {
 });
 
 kindInput.addEventListener("change", () => {
-  syncComposerAdminUi();
+  syncComposerAdminUi({ applyDefaultInterval: true });
 });
 
 editKindInput.addEventListener("change", () => {
-  syncComposerAdminUi();
+  syncComposerAdminUi({ applyDefaultInterval: true });
 });
 
 editForm.addEventListener("submit", (event) => {
@@ -3582,10 +3816,9 @@ form.addEventListener("submit", async (event) => {
   submit.disabled = true;
   setStatus("Saving…");
   try {
-    const kind = kindInput.value || "once";
-    const recurrence = resolveRecurrence(
-      kind,
-      Number(recurrenceIntervalInput.value) || DEFAULT_PERIODIC_INTERVAL,
+    const selected = resolveKindSelection(
+      kindInput.value || "once",
+      Number(recurrenceIntervalInput.value) || undefined,
       recurrenceUnitInput.value || DEFAULT_PERIODIC_UNIT,
     );
     const payload = {
@@ -3594,9 +3827,9 @@ form.addEventListener("submit", async (event) => {
       assignee: assigneeInput.value.trim() || undefined,
       dueDate: dueDateInput.value || undefined,
       completeBy: completeByFromLocalInput(completeByInput?.value),
-      kind,
-      recurrenceInterval: recurrence.recurrenceInterval,
-      recurrenceUnit: recurrence.recurrenceUnit,
+      kind: selected.kind,
+      recurrenceInterval: selected.recurrenceInterval,
+      recurrenceUnit: selected.recurrenceUnit,
       points: Math.max(
         0,
         Math.floor(Number(pointsInput.value) || DEFAULT_TASK_POINTS),
@@ -3610,13 +3843,14 @@ form.addEventListener("submit", async (event) => {
       submit.disabled = false;
       return;
     }
+    let created = null;
     if (backend === "supabase-rich") {
-      await addRichSupabase(payload);
+      created = await addRichSupabase(payload);
       if (payload.assignee) await findOrCreatePerson(payload.assignee);
     } else if (backend === "supabase") {
-      await addLegacySupabase(payload);
+      created = await addLegacySupabase(payload);
     } else if (backend === "api") {
-      await api("api/chores", {
+      const data = await api("api/chores", {
         method: "POST",
         body: JSON.stringify({
           title: payload.title,
@@ -3624,6 +3858,7 @@ form.addEventListener("submit", async (event) => {
           dueDate: payload.dueDate,
         }),
       });
+      created = data.chore ? { ...data.chore, mode: "legacy" } : null;
     } else {
       const store = loadLocalV2();
       const now = new Date().toISOString();
@@ -3657,7 +3892,7 @@ form.addEventListener("submit", async (event) => {
         kind: payload.kind,
         recurrenceInterval: payload.recurrenceInterval,
         recurrenceUnit: payload.recurrenceUnit,
-        cooldownDays: recurrence.cooldownDays,
+        cooldownDays: selected.cooldownDays,
         points: payload.points,
         steps: payload.steps,
         referencePhotoPath: referencePath,
@@ -3667,8 +3902,9 @@ form.addEventListener("submit", async (event) => {
         active: true,
         createdAt: now,
       });
+      const instanceId = newId("inst");
       store.instances.push({
-        id: newId("inst"),
+        id: instanceId,
         templateId,
         title: payload.title,
         description: payload.description,
@@ -3683,6 +3919,38 @@ form.addEventListener("submit", async (event) => {
         source: "manual",
       });
       saveLocalV2(store);
+      created = instanceToView(
+        {
+          id: instanceId,
+          template_id: templateId,
+          title: payload.title,
+          description: payload.description,
+          status: person ? "assigned" : "open",
+          assignee: person?.displayName,
+          due_date: payload.dueDate,
+          complete_by: person && payload.completeBy ? payload.completeBy : undefined,
+          created_at: now,
+        },
+        {
+          id: templateId,
+          title: payload.title,
+          kind: payload.kind,
+          recurrence_interval: payload.recurrenceInterval,
+          recurrence_unit: payload.recurrenceUnit,
+          points: payload.points,
+          steps: payload.steps,
+          reference_photo_path: referencePath,
+        },
+      );
+    }
+    // Paint the new open task immediately, then revalidate.
+    if (created) {
+      rememberCreatedChore(created);
+      if (filter === "open" || filter === "all") {
+        chores = [created, ...chores.filter((c) => c.id !== created.id)];
+        writeSwrCache();
+        render();
+      }
     }
     form.reset();
     kindInput.value = "once";
@@ -3698,6 +3966,11 @@ form.addEventListener("submit", async (event) => {
         item.classList.toggle("is-active", active);
         item.setAttribute("aria-selected", active ? "true" : "false");
       });
+      if (created) {
+        chores = [created, ...chores.filter((c) => c.id !== created.id)];
+        writeSwrCache();
+        render();
+      }
     }
     setStatus(
       backend === "supabase" || backend === "supabase-rich"

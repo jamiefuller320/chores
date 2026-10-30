@@ -147,6 +147,10 @@ let paintedFromCache = false;
 let composerOpen = false;
 /** True after detectBackend finishes so claim release can persist. */
 let backendReady = false;
+/** Monotonic load generation — drop stale poll/save responses. */
+let loadEpoch = 0;
+/** Last painted board fingerprint; quiet polls skip DOM/SWR when unchanged. */
+let lastBoardFingerprint = "";
 /** @type {Set<string>} */
 const pendingReleaseIds = new Set();
 /** @type {ReturnType<typeof setTimeout> | null} */
@@ -1161,8 +1165,8 @@ function rowToLegacyChore(row) {
   };
 }
 
-function latestCompletionForInstance(instanceId) {
-  const matches = completions.filter(
+function latestCompletionForInstance(instanceId, list = completions) {
+  const matches = (list ?? []).filter(
     (c) => (c.instanceId ?? c.instance_id) === instanceId,
   );
   if (matches.length === 0) return null;
@@ -1174,7 +1178,7 @@ function latestCompletionForInstance(instanceId) {
   return matches[0];
 }
 
-function instanceToView(row, template) {
+function instanceToView(row, template, completionList = completions) {
   const status = row.status;
   const openLike =
     status === "noticed" || status === "open" || status === "assigned";
@@ -1185,7 +1189,7 @@ function instanceToView(row, template) {
   const points = Number(
     template?.points ?? DEFAULT_TASK_POINTS,
   );
-  const completion = latestCompletionForInstance(row.id);
+  const completion = latestCompletionForInstance(row.id, completionList);
   const assessmentStatus =
     completion?.assessmentStatus ?? completion?.assessment_status ?? null;
   const description =
@@ -1214,6 +1218,49 @@ function instanceToView(row, template) {
     assessmentStatus,
     mode: "instance",
   };
+}
+
+/** Stable snapshot of list/scoreboard state for poll short-circuit + stale drops. */
+function boardFingerprint(snapshot = null) {
+  const c = snapshot?.chores ?? chores;
+  const p = snapshot?.people ?? people;
+  const scores = snapshot?.scoreRows ?? scoreRows;
+  const history = snapshot?.pointsHistory ?? pointsHistory;
+  const resetAt = snapshot?.lastPointsResetAt ?? lastPointsResetAt;
+  return JSON.stringify({
+    filter,
+    backend,
+    resetAt: resetAt ?? null,
+    people: (p ?? []).map((row) => [row.id, row.displayName, row.role]),
+    scores: (scores ?? []).map((row) => [row.personId, row.points]),
+    history: (history ?? []).map((row) => [
+      row.id,
+      row.personId,
+      row.points,
+      row.weekEnding,
+    ]),
+    chores: (c ?? []).map((row) => [
+      row.id,
+      row.title,
+      row.description ?? null,
+      row.status,
+      row.instanceStatus ?? null,
+      row.assignee ?? null,
+      row.assigneePersonId ?? null,
+      row.points ?? null,
+      row.kind ?? null,
+      row.recurrenceInterval ?? null,
+      row.recurrenceUnit ?? null,
+      row.dueDate ?? null,
+      row.dueAt ?? null,
+      row.completeBy ?? null,
+      row.assessmentStatus ?? null,
+      row.completionId ?? null,
+      row.templateId ?? null,
+      row.referencePhotoPath ?? null,
+      JSON.stringify(row.steps ?? []),
+    ]),
+  });
 }
 
 async function listLegacySupabase(status) {
@@ -1465,7 +1512,11 @@ async function maybeWeeklyPointsResetRich(peopleList, completionList, metaRow) {
   };
 }
 
-async function listRichSupabase(status) {
+/**
+ * Fetch rich board without mutating globals — caller applies only if loadEpoch
+ * still matches (drops in-flight poll results that would overwrite a newer save).
+ */
+async function fetchRichBoard(status) {
   const [instanceRows, templateRows, peopleRows, completionRows, metaRow] =
     await Promise.all([
       supabaseRequest("task_instances?select=*&order=created_at.desc"),
@@ -1474,33 +1525,75 @@ async function listRichSupabase(status) {
       supabaseRequest("completion_events?select=*&order=completed_at.desc"),
       fetchHouseholdMetaRich(),
     ]);
-  people = (peopleRows ?? []).map((row) => ({
+  const nextPeople = (peopleRows ?? []).map((row) => ({
     id: row.id,
     displayName: row.display_name,
     role: row.role,
   }));
-  templatesById = new Map((templateRows ?? []).map((row) => [row.id, row]));
-  completions = completionRows ?? [];
+  const nextTemplates = new Map(
+    (templateRows ?? []).map((row) => [row.id, row]),
+  );
+  const nextCompletions = completionRows ?? [];
 
-  const reset = await maybeWeeklyPointsResetRich(people, completions, metaRow);
-  lastPointsResetAt = reset.lastResetAt;
-  pointsHistory = reset.history;
-  scoreRows = computeScoreboard(people, completions, lastPointsResetAt);
+  const reset = await maybeWeeklyPointsResetRich(
+    nextPeople,
+    nextCompletions,
+    metaRow,
+  );
+  const nextScoreRows = computeScoreboard(
+    nextPeople,
+    nextCompletions,
+    reset.lastResetAt,
+  );
 
+  let rows = instanceRows;
   const promoted = await promoteDueWaitingRich(instanceRows);
   const released = await releaseExpiredClaimsRich(instanceRows);
   if (promoted || released) {
-    const refreshed = await supabaseRequest(
+    rows = await supabaseRequest(
       "task_instances?select=*&order=created_at.desc",
     );
-    return finalizeRichViews(refreshed, status);
   }
-  return finalizeRichViews(instanceRows, status);
+
+  return {
+    people: nextPeople,
+    templatesById: nextTemplates,
+    completions: nextCompletions,
+    scoreRows: nextScoreRows,
+    pointsHistory: reset.history,
+    lastPointsResetAt: reset.lastResetAt,
+    chores: finalizeRichViews(
+      rows,
+      status,
+      nextTemplates,
+      nextCompletions,
+    ),
+  };
 }
 
-function finalizeRichViews(instanceRows, status) {
+async function listRichSupabase(status) {
+  const board = await fetchRichBoard(status);
+  people = board.people;
+  templatesById = board.templatesById;
+  completions = board.completions;
+  scoreRows = board.scoreRows;
+  pointsHistory = board.pointsHistory;
+  lastPointsResetAt = board.lastPointsResetAt;
+  return board.chores;
+}
+
+function finalizeRichViews(
+  instanceRows,
+  status,
+  templateMap = templatesById,
+  completionList = completions,
+) {
   const views = (instanceRows ?? []).map((row) =>
-    instanceToView(row, row.template_id ? templatesById.get(row.template_id) : null),
+    instanceToView(
+      row,
+      row.template_id ? templateMap.get(row.template_id) : null,
+      completionList,
+    ),
   );
   if (status === "scores" || status === "all") return views;
   if (status === "done") {
@@ -2985,26 +3078,65 @@ function mergeRecentCreatesIntoList() {
 }
 
 async function loadChores({ quiet = false } = {}) {
+  const epoch = ++loadEpoch;
+  const statusKey = filter === "people" ? "all" : filter;
+
   if (backend === "supabase-rich") {
-    chores = await listRichSupabase(filter === "people" ? "all" : filter);
+    const board = await fetchRichBoard(statusKey);
+    if (epoch !== loadEpoch) return;
+    people = board.people;
+    templatesById = board.templatesById;
+    completions = board.completions;
+    scoreRows = board.scoreRows;
+    pointsHistory = board.pointsHistory;
+    lastPointsResetAt = board.lastPointsResetAt;
+    chores = board.chores;
+    mergeRecentCreatesIntoList();
+    paintedFromCache = false;
+    const fp = boardFingerprint();
+    if (quiet && fp === lastBoardFingerprint) return;
+    lastBoardFingerprint = fp;
+    writeSwrCache();
+    render();
   } else if (backend === "supabase") {
-    chores = await listLegacySupabase(filter === "people" ? "all" : filter);
+    const nextChores = await listLegacySupabase(statusKey);
+    if (epoch !== loadEpoch) return;
+    chores = nextChores;
     scoreRows = [];
+    mergeRecentCreatesIntoList();
+    paintedFromCache = false;
+    const fp = boardFingerprint();
+    if (quiet && fp === lastBoardFingerprint) return;
+    lastBoardFingerprint = fp;
+    writeSwrCache();
+    render();
   } else if (backend === "api") {
     const statusParam =
       filter === "scores" || filter === "people" ? "all" : filter;
     const data = await api(
       `api/chores?status=${encodeURIComponent(statusParam)}`,
     );
+    if (epoch !== loadEpoch) return;
     chores = (data.chores ?? []).map((c) => ({ ...c, mode: "legacy" }));
     scoreRows = [];
+    mergeRecentCreatesIntoList();
+    paintedFromCache = false;
+    const fp = boardFingerprint();
+    if (quiet && fp === lastBoardFingerprint) return;
+    lastBoardFingerprint = fp;
+    writeSwrCache();
+    render();
   } else {
-    chores = listLocal(filter === "people" ? "all" : filter);
+    chores = listLocal(statusKey);
+    mergeRecentCreatesIntoList();
+    paintedFromCache = false;
+    const fp = boardFingerprint();
+    if (quiet && fp === lastBoardFingerprint) return;
+    lastBoardFingerprint = fp;
+    writeSwrCache();
+    render();
   }
-  mergeRecentCreatesIntoList();
-  paintedFromCache = false;
-  writeSwrCache();
-  render();
+
   if (!quiet && (backend === "supabase" || backend === "supabase-rich")) {
     setStatus(
       backend === "supabase-rich"
@@ -3012,6 +3144,40 @@ async function loadChores({ quiet = false } = {}) {
         : "Synced with Supabase.",
     );
   }
+}
+
+/** Paint an edited chore immediately so a slow/stale poll cannot flash the old row. */
+function applyEditedChoreLocally(updated) {
+  if (!updated?.id) return;
+  const openLike =
+    updated.instanceStatus === "noticed" ||
+    updated.instanceStatus === "open" ||
+    updated.instanceStatus === "assigned" ||
+    (updated.status === "open" && !updated.instanceStatus);
+  const showInFilter =
+    filter === "all" ||
+    filter === "people" ||
+    filter === "scores" ||
+    (filter === "open" && openLike) ||
+    (filter === "done" &&
+      (updated.status === "done" || updated.instanceStatus === "done"));
+  const index = chores.findIndex((c) => c.id === updated.id);
+  if (index >= 0) {
+    if (showInFilter) {
+      chores = [
+        ...chores.slice(0, index),
+        updated,
+        ...chores.slice(index + 1),
+      ];
+    } else {
+      chores = chores.filter((c) => c.id !== updated.id);
+    }
+  } else if (showInFilter) {
+    chores = [updated, ...chores];
+  }
+  lastBoardFingerprint = boardFingerprint();
+  writeSwrCache();
+  render();
 }
 
 async function ensureMePerson() {
@@ -3302,10 +3468,42 @@ async function updateLocalTask(chore, input) {
   }
   store.instances[index] = next;
   saveLocalV2(store);
+  const template = store.templates.find((t) => t.id === next.templateId) || null;
+  const templateRow = template
+    ? {
+        id: template.id,
+        title: template.title,
+        description: template.description,
+        kind: template.kind,
+        recurrence_interval: template.recurrenceInterval,
+        recurrence_unit: template.recurrenceUnit,
+        points: template.points,
+        steps: template.steps ?? [],
+        reference_photo_path: template.referencePhotoPath,
+      }
+    : null;
+  return instanceToView(
+    {
+      id: next.id,
+      title: next.title,
+      description: next.description,
+      status: next.status,
+      assignee: next.assignee,
+      assignee_person_id: next.assigneePersonId ?? next.assignee_person_id,
+      due_date: next.dueDate ?? next.due_date,
+      due_at: next.dueAt ?? next.due_at,
+      complete_by: next.completeBy ?? next.complete_by,
+      created_at: next.createdAt ?? next.created_at,
+      completed_at: next.completedAt ?? next.completed_at,
+      template_id: next.templateId ?? next.template_id,
+    },
+    templateRow,
+    store.completions,
+  );
 }
 
 async function updateLegacyTask(chore, input) {
-  await updateLegacySupabase(chore.id, {
+  return updateLegacySupabase(chore.id, {
     title: input.title.trim(),
     assignee: input.assignee?.trim() || "",
     dueDate: input.dueDate || "",
@@ -3314,30 +3512,40 @@ async function updateLegacyTask(chore, input) {
 
 async function saveEditTask(chore, input) {
   if (!input.title) {
-    setStatus("Title is required.");
+    pendingEdit = chore;
+    setStatus("Title is required.", { tone: "error" });
+    if (typeof editDialog.showModal === "function") editDialog.showModal();
     return;
   }
   const holdError = assignmentHoldError(input.assignee, input.completeBy);
   if (holdError) {
-    setStatus(holdError);
+    pendingEdit = chore;
+    setStatus(holdError, { tone: "error" });
     if (typeof editDialog.showModal === "function") editDialog.showModal();
     return;
   }
+  pendingEdit = null;
   try {
     setStatus("Saving changes…");
+    let updated = null;
     if (backend === "supabase-rich") {
-      await updateRichTask(chore, input);
+      updated = await updateRichTask(chore, input);
     } else if (backend === "local") {
-      await updateLocalTask(chore, input);
+      updated = await updateLocalTask(chore, input);
     } else if (backend === "supabase") {
-      await updateLegacyTask(chore, input);
+      updated = await updateLegacyTask(chore, input);
     } else {
       throw new Error("Edit needs Supabase or local mode.");
     }
-    setStatus("Task updated.");
+    if (updated) applyEditedChoreLocally(updated);
+    setStatus("Task updated.", { tone: "ok" });
+    // Bump epoch so any in-flight poll cannot overwrite this paint with pre-edit rows.
+    loadEpoch += 1;
     await loadChores({ quiet: true });
   } catch (error) {
-    setStatus(error.message);
+    pendingEdit = chore;
+    setStatus(error.message, { tone: "error" });
+    if (typeof editDialog.showModal === "function") editDialog.showModal();
   }
 }
 
@@ -3843,16 +4051,27 @@ editKindInput.addEventListener("change", () => {
   syncComposerAdminUi({ applyDefaultInterval: true });
 });
 
+// Edit sheet: explicit buttons (like Mark done). Do not rely on method=dialog
+// + event.submitter — missing submitter defaults to cancel and drops the save
+// (Enter key / older WebKit). Collect payload before close so fields stay readable.
 editForm.addEventListener("submit", (event) => {
-  const submitter = event.submitter;
-  const value = submitter?.value || "cancel";
-  if (value !== "save" || !pendingEdit) {
-    pendingEdit = null;
+  event.preventDefault();
+});
+
+document.querySelector("#edit-cancel")?.addEventListener("click", () => {
+  pendingEdit = null;
+  editDialog?.close();
+});
+
+document.querySelector("#edit-save")?.addEventListener("click", () => {
+  if (!pendingEdit) {
+    editDialog?.close();
     return;
   }
   const chore = pendingEdit;
-  pendingEdit = null;
-  void saveEditTask(chore, collectEditPayload());
+  const payload = collectEditPayload();
+  editDialog?.close();
+  void saveEditTask(chore, payload);
 });
 
 filterButtons.forEach((button) => {

@@ -917,9 +917,18 @@ body {
 
 .form-status {
   min-height: 1.2rem;
-  margin: 0.45rem 0 0;
+  margin: 0.45rem 0.15rem 0;
   color: var(--ink-soft);
   font-size: 0.88rem;
+}
+
+.form-status.is-error {
+  color: #8b2e2e;
+  font-weight: 600;
+}
+
+.form-status.is-ok {
+  color: var(--accent-deep);
 }
 
 .hidden {

@@ -4,6 +4,7 @@ const peoplePanelEl = document.querySelector("#people-panel");
 const emptyEl = document.querySelector("#empty-state");
 const summaryEl = document.querySelector("#summary");
 const composerDock = document.querySelector("#composer-dock");
+const composerDialog = document.querySelector("#composer-dialog");
 const newTaskToggle = document.querySelector("#new-task-toggle");
 const composerCloseBtn = document.querySelector("#composer-close");
 const form = document.querySelector("#add-form");
@@ -2813,6 +2814,11 @@ function openTaskCard(chore) {
   taskCardTitle.textContent = chore.title;
   taskCardBody.innerHTML = "";
   taskCardActions.innerHTML = "";
+  const actionsLeft = document.createElement("div");
+  actionsLeft.className = "task-card-actions-left";
+  const actionsRight = document.createElement("div");
+  actionsRight.className = "task-card-actions-right";
+  taskCardActions.append(actionsLeft, actionsRight);
 
   const meta = buildTaskMeta(chore);
   if (meta.childNodes.length > 0) taskCardBody.append(meta);
@@ -2851,28 +2857,8 @@ function openTaskCard(chore) {
     taskCardBody.append(figure);
   }
 
-  if (!done && chore.instanceStatus !== "waiting") {
-    const markDone = document.createElement("button");
-    markDone.type = "button";
-    markDone.className = "primary";
-    markDone.textContent = "Mark done";
-    markDone.addEventListener("click", () => {
-      closeTaskCard();
-      onCheckClick(chore);
-    });
-    taskCardActions.append(markDone);
-  } else if (done) {
-    const reopen = document.createElement("button");
-    reopen.type = "button";
-    reopen.className = "ghost";
-    reopen.textContent = "Reopen";
-    reopen.addEventListener("click", () => {
-      closeTaskCard();
-      void reopenChore(chore);
-    });
-    taskCardActions.append(reopen);
-  }
-
+  // Footer: secondary on the left (Edit / Reject), primary on the right (Mark done / Reopen / Approve).
+  // "I'll do it" was removed — open tasks use Mark done only.
   if (backend === "supabase-rich" || backend === "local" || backend === "supabase") {
     const edit = document.createElement("button");
     edit.type = "button";
@@ -2882,7 +2868,7 @@ function openTaskCard(chore) {
       closeTaskCard();
       openEditDialog(chore);
     });
-    taskCardActions.append(edit);
+    actionsLeft.append(edit);
   }
 
   if (
@@ -2892,14 +2878,6 @@ function openTaskCard(chore) {
     isAdmin() &&
     (backend === "supabase-rich" || backend === "local")
   ) {
-    const approve = document.createElement("button");
-    approve.type = "button";
-    approve.className = "primary";
-    approve.textContent = `Approve (+${chore.points ?? DEFAULT_TASK_POINTS} pts)`;
-    approve.addEventListener("click", () => {
-      closeTaskCard();
-      void assessChore(chore, "approved");
-    });
     const reject = document.createElement("button");
     reject.type = "button";
     reject.className = "ghost";
@@ -2908,8 +2886,42 @@ function openTaskCard(chore) {
       closeTaskCard();
       void assessChore(chore, "rejected");
     });
-    taskCardActions.append(approve, reject);
+    actionsLeft.append(reject);
+
+    const approve = document.createElement("button");
+    approve.type = "button";
+    approve.className = "primary";
+    approve.textContent = `Approve (+${chore.points ?? DEFAULT_TASK_POINTS} pts)`;
+    approve.addEventListener("click", () => {
+      closeTaskCard();
+      void assessChore(chore, "approved");
+    });
+    actionsRight.append(approve);
+  } else if (!done && chore.instanceStatus !== "waiting") {
+    const markDone = document.createElement("button");
+    markDone.type = "button";
+    markDone.className = "primary";
+    markDone.textContent = "Mark done";
+    markDone.addEventListener("click", () => {
+      closeTaskCard();
+      onCheckClick(chore);
+    });
+    actionsRight.append(markDone);
+  } else if (done) {
+    const reopen = document.createElement("button");
+    reopen.type = "button";
+    reopen.className = "ghost";
+    reopen.textContent = "Reopen";
+    reopen.addEventListener("click", () => {
+      closeTaskCard();
+      void reopenChore(chore);
+    });
+    actionsRight.append(reopen);
   }
+
+  const hasActions =
+    actionsLeft.childNodes.length > 0 || actionsRight.childNodes.length > 0;
+  taskCardActions.hidden = !hasActions;
 
   if (typeof taskDialog.showModal === "function") {
     taskDialog.showModal();
@@ -2924,16 +2936,18 @@ function closeTaskCard() {
 function setComposerOpen(open) {
   composerOpen = Boolean(open);
   composerDock?.classList.toggle("is-open", composerOpen);
-  if (form) {
-    form.hidden = !composerOpen;
-    form.classList.toggle("is-collapsed", !composerOpen);
-  }
   if (newTaskToggle) {
     newTaskToggle.setAttribute("aria-expanded", composerOpen ? "true" : "false");
-    newTaskToggle.classList.toggle("hidden", composerOpen);
   }
+  if (!composerDialog) return;
   if (composerOpen) {
-    titleInput?.focus();
+    if (!composerDialog.open && typeof composerDialog.showModal === "function") {
+      composerDialog.showModal();
+    }
+    // Defer focus so iPad Safari doesn't fight the dialog open animation.
+    requestAnimationFrame(() => titleInput?.focus());
+  } else if (composerDialog.open) {
+    composerDialog.close();
   }
 }
 
@@ -3787,6 +3801,16 @@ newTaskToggle?.addEventListener("click", () => {
 
 composerCloseBtn?.addEventListener("click", () => {
   setComposerOpen(false);
+});
+
+composerDialog?.addEventListener("close", () => {
+  composerOpen = false;
+  composerDock?.classList.remove("is-open");
+  newTaskToggle?.setAttribute("aria-expanded", "false");
+});
+
+composerDialog?.addEventListener("cancel", () => {
+  composerOpen = false;
 });
 
 taskCardClose?.addEventListener("click", () => {

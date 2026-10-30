@@ -243,6 +243,10 @@ create index if not exists task_instances_template_idx
   on public.task_instances (template_id);
 
 -- Additive when task_instances already existed without the hold column.
+-- REQUIRED if Add task fails with PGRST204 ("Could not find the 'complete_by'
+-- column"). Older School Compass deploys created task_instances before this
+-- column landed; Pages clients that sent complete_by (even null) were rejected
+-- and the new open task never appeared. Safe to re-run.
 alter table public.task_instances add column if not exists complete_by timestamptz;
 
 create index if not exists task_instances_complete_by_idx

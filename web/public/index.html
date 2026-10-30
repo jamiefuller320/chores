@@ -116,7 +116,8 @@
             <select id="kind" name="kind" aria-label="Repeat kind">
               <option value="once">Once</option>
               <option value="daily">Daily</option>
-              <option value="periodic">Repeats</option>
+              <option value="days_after">Every N days after done</option>
+              <option value="periodic">Every N weeks</option>
             </select>
             <input
               id="dueDate"
@@ -138,7 +139,7 @@
             </p>
           </div>
           <div id="recurrence-fields" class="recurrence-fields hidden">
-            <label class="field-label" for="recurrenceInterval">Every</label>
+            <label class="field-label" for="recurrenceInterval" id="recurrence-interval-label">Every</label>
             <input
               id="recurrenceInterval"
               name="recurrenceInterval"
@@ -148,11 +149,14 @@
               value="4"
               aria-label="Recurrence interval"
             />
-            <select id="recurrenceUnit" name="recurrenceUnit" aria-label="Recurrence unit">
+            <span id="recurrence-unit-text" class="recurrence-unit-text">weeks</span>
+            <select id="recurrenceUnit" name="recurrenceUnit" class="hidden" aria-hidden="true" tabindex="-1">
               <option value="week" selected>weeks</option>
               <option value="day">days</option>
             </select>
-            <p class="field-hint">Default for repeats is every 4 weeks.</p>
+            <p class="field-hint" id="recurrence-hint">
+              Default for weekly repeats is every 4 weeks.
+            </p>
           </div>
           <div id="points-fields" class="points-fields">
             <label class="field-label" for="points">Points</label>
@@ -322,10 +326,11 @@
         <select id="edit-kind" name="kind">
           <option value="once">Once</option>
           <option value="daily">Daily</option>
-          <option value="periodic">Repeats</option>
+          <option value="days_after">Every N days after done</option>
+          <option value="periodic">Every N weeks</option>
         </select>
         <div id="edit-recurrence-fields" class="recurrence-fields hidden">
-          <label class="field-label" for="edit-recurrenceInterval">Every</label>
+          <label class="field-label" for="edit-recurrenceInterval" id="edit-recurrence-interval-label">Every</label>
           <input
             id="edit-recurrenceInterval"
             name="recurrenceInterval"
@@ -334,10 +339,14 @@
             max="365"
             value="4"
           />
-          <select id="edit-recurrenceUnit" name="recurrenceUnit">
+          <span id="edit-recurrence-unit-text" class="recurrence-unit-text">weeks</span>
+          <select id="edit-recurrenceUnit" name="recurrenceUnit" class="hidden" aria-hidden="true" tabindex="-1">
             <option value="week">weeks</option>
             <option value="day">days</option>
           </select>
+          <p class="field-hint" id="edit-recurrence-hint">
+            Default for weekly repeats is every 4 weeks.
+          </p>
         </div>
         <label class="field-label" for="edit-points">Points</label>
         <input id="edit-points" name="points" type="number" min="0" max="999" value="1" />

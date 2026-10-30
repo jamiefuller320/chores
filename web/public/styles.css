@@ -147,6 +147,12 @@ body {
   padding: 0.35rem 0.55rem;
 }
 
+.recurrence-unit-text {
+  font-size: 0.9rem;
+  color: var(--ink-soft);
+  font-weight: 600;
+}
+
 .field-hint {
   flex-basis: 100%;
   margin: 0;

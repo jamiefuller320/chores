@@ -359,8 +359,41 @@ function assignmentHoldError(assignee, completeByIso) {
   return null;
 }
 
-function setStatus(message) {
-  formStatus.textContent = message;
+function setStatus(message, { tone = "neutral" } = {}) {
+  if (!formStatus) return;
+  formStatus.textContent = message || "";
+  formStatus.classList.toggle("is-error", tone === "error");
+  formStatus.classList.toggle("is-ok", tone === "ok");
+}
+
+function formatAddError(error) {
+  const raw = String(error?.message || error || "Could not add task.");
+  if (/complete_by/i.test(raw) || /PGRST204/i.test(raw)) {
+    return `Could not save task (database column missing). Run the complete_by SQL in Supabase, then try again. (${raw})`;
+  }
+  if (/Failed to fetch|NetworkError|Load failed/i.test(raw)) {
+    return `Could not reach Supabase — check connection and try again. (${raw})`;
+  }
+  return raw.startsWith("Could not") ? raw : `Could not add task: ${raw}`;
+}
+
+/** Close composer and put the created open task on the title list immediately. */
+function showCreatedTaskOnList(created) {
+  if (!created) return;
+  rememberCreatedChore(created);
+  if (filter === "done" || filter === "scores" || filter === "people") {
+    filter = "open";
+    filterButtons.forEach((item) => {
+      const active = item.dataset.filter === "open";
+      item.classList.toggle("is-active", active);
+      item.setAttribute("aria-selected", active ? "true" : "false");
+    });
+  }
+  if (filter === "open" || filter === "all") {
+    chores = [created, ...chores.filter((c) => String(c.id) !== String(created.id))];
+    writeSwrCache();
+    render();
+  }
 }
 
 function newId(prefix) {
@@ -1074,8 +1107,15 @@ async function supabaseRequest(path, options = {}) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const message =
-      data?.message || data?.error_description || data?.hint || `Supabase ${response.status}`;
-    throw new Error(message);
+      data?.message ||
+      data?.error_description ||
+      data?.hint ||
+      data?.error ||
+      `Supabase ${response.status}`;
+    const err = new Error(message);
+    err.code = data?.code;
+    err.status = response.status;
+    throw err;
   }
   return data;
 }
@@ -3810,7 +3850,11 @@ filterButtons.forEach((button) => {
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const title = titleInput.value.trim();
-  if (!title) return;
+  if (!title) {
+    setStatus("Enter a task title, then tap Add.", { tone: "error" });
+    titleInput?.focus();
+    return;
+  }
 
   const submit = form.querySelector('button[type="submit"]');
   submit.disabled = true;
@@ -3839,7 +3883,7 @@ form.addEventListener("submit", async (event) => {
     };
     const holdError = assignmentHoldError(payload.assignee, payload.completeBy);
     if (holdError) {
-      setStatus(holdError);
+      setStatus(holdError, { tone: "error" });
       submit.disabled = false;
       return;
     }
@@ -3928,7 +3972,8 @@ form.addEventListener("submit", async (event) => {
           status: person ? "assigned" : "open",
           assignee: person?.displayName,
           due_date: payload.dueDate,
-          complete_by: person && payload.completeBy ? payload.completeBy : undefined,
+          complete_by:
+            person && payload.completeBy ? payload.completeBy : undefined,
           created_at: now,
         },
         {
@@ -3943,15 +3988,12 @@ form.addEventListener("submit", async (event) => {
         },
       );
     }
-    // Paint the new open task immediately, then revalidate.
-    if (created) {
-      rememberCreatedChore(created);
-      if (filter === "open" || filter === "all") {
-        chores = [created, ...chores.filter((c) => c.id !== created.id)];
-        writeSwrCache();
-        render();
-      }
+    if (!created?.id) {
+      throw new Error("Save returned no task — nothing was added.");
     }
+
+    // 1) Put title on the open list immediately  2) close New task tile  3) revalidate
+    showCreatedTaskOnList(created);
     form.reset();
     kindInput.value = "once";
     recurrenceIntervalInput.value = String(DEFAULT_PERIODIC_INTERVAL);
@@ -3959,29 +4001,28 @@ form.addEventListener("submit", async (event) => {
     pointsInput.value = String(DEFAULT_TASK_POINTS);
     syncComposerAdminUi();
     setComposerOpen(false);
-    if (filter === "done" || filter === "scores" || filter === "people") {
-      filter = "open";
-      filterButtons.forEach((item) => {
-        const active = item.dataset.filter === "open";
-        item.classList.toggle("is-active", active);
-        item.setAttribute("aria-selected", active ? "true" : "false");
-      });
-      if (created) {
-        chores = [created, ...chores.filter((c) => c.id !== created.id)];
-        writeSwrCache();
-        render();
-      }
-    }
     setStatus(
       backend === "supabase" || backend === "supabase-rich"
-        ? "Added (synced)."
+        ? `Added “${created.title}”.`
         : backend === "local"
-          ? "Added (saved on this device)."
-          : "Added.",
+          ? `Added “${created.title}” (this device).`
+          : `Added “${created.title}”.`,
+      { tone: "ok" },
     );
-    await loadChores({ quiet: true });
+    try {
+      await loadChores({ quiet: true });
+      showCreatedTaskOnList(created);
+    } catch (refreshError) {
+      console.warn("Refresh after add failed", refreshError);
+      showCreatedTaskOnList(created);
+      setStatus(
+        `Added “${created.title}” (list refresh lagged — pull to refresh if needed).`,
+        { tone: "ok" },
+      );
+    }
   } catch (error) {
-    setStatus(error.message);
+    setComposerOpen(true);
+    setStatus(formatAddError(error), { tone: "error" });
   } finally {
     submit.disabled = false;
   }
@@ -3999,8 +4040,30 @@ document.addEventListener("visibilitychange", () => {
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     void navigator.serviceWorker
-      .register(new URL("sw.js", BASE), { scope: BASE.pathname })
+      .register(new URL("sw.js", BASE), {
+        scope: BASE.pathname,
+        updateViaCache: "none",
+      })
+      .then((reg) => {
+        void reg.update();
+        // If a waiting worker has the Add fix, activate it without a second visit.
+        if (reg.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
+        reg.addEventListener("updatefound", () => {
+          const worker = reg.installing;
+          worker?.addEventListener("statechange", () => {
+            if (worker.state === "installed" && navigator.serviceWorker.controller) {
+              worker.postMessage({ type: "SKIP_WAITING" });
+            }
+          });
+        });
+      })
       .catch(() => {});
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      // One reload so the New-task Add fix is guaranteed after SW bump.
+      if (sessionStorage.getItem("chores.swReloaded") === "1") return;
+      sessionStorage.setItem("chores.swReloaded", "1");
+      location.reload();
+    });
   });
 }
 

@@ -24,7 +24,7 @@
       href="https://fonts.googleapis.com/css2?family=Figtree:wght@500;600;700&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="./styles.css?v=20261030b" />
+    <link rel="stylesheet" href="./styles.css?v=20261030c" />
   </head>
   <body>
     <div class="atmosphere" aria-hidden="true"></div>
@@ -80,136 +80,140 @@
           id="new-task-toggle"
           class="new-task-toggle primary"
           aria-expanded="false"
-          aria-controls="add-form"
+          aria-controls="composer-dialog"
         >
           New task
         </button>
-        <form id="add-form" class="composer is-collapsed" autocomplete="off" hidden>
-          <div class="composer-head">
-            <p class="composer-heading">New task</p>
-            <button type="button" id="composer-close" class="ghost composer-close">
-              Close
-            </button>
-          </div>
-          <label class="composer-label" for="title">New chore</label>
-          <div class="composer-row">
-            <input
-              id="title"
-              name="title"
-              type="text"
-              enterkeyhint="done"
-              placeholder="What needs doing?"
-              required
-              maxlength="120"
-            />
-            <button type="submit" class="primary">Add</button>
-          </div>
-          <div class="composer-meta">
-            <input
-              id="assignee"
-              name="assignee"
-              type="text"
-              placeholder="Assign to… (optional)"
-              maxlength="40"
-              aria-label="Assignee"
-            />
-            <select id="kind" name="kind" aria-label="Repeat kind">
-              <option value="once">Once</option>
-              <option value="daily">Daily</option>
-              <option value="days_after">Every N days after done</option>
-              <option value="periodic">Every N weeks</option>
-            </select>
-            <input
-              id="dueDate"
-              name="dueDate"
-              type="date"
-              aria-label="Due date"
-            />
-          </div>
-          <div id="complete-by-fields" class="complete-by-fields hidden">
-            <label class="field-label" for="completeBy">Complete by</label>
-            <input
-              id="completeBy"
-              name="completeBy"
-              type="datetime-local"
-              aria-label="Complete by"
-            />
-            <p class="field-hint">
-              After this time, if it isn’t done, the task opens for anyone.
-            </p>
-          </div>
-          <div id="recurrence-fields" class="recurrence-fields hidden">
-            <label class="field-label" for="recurrenceInterval" id="recurrence-interval-label">Every</label>
-            <input
-              id="recurrenceInterval"
-              name="recurrenceInterval"
-              type="number"
-              min="1"
-              max="365"
-              value="4"
-              aria-label="Recurrence interval"
-            />
-            <span id="recurrence-unit-text" class="recurrence-unit-text">weeks</span>
-            <select id="recurrenceUnit" name="recurrenceUnit" class="hidden" aria-hidden="true" tabindex="-1">
-              <option value="week" selected>weeks</option>
-              <option value="day">days</option>
-            </select>
-            <p class="field-hint" id="recurrence-hint">
-              Default for weekly repeats is every 4 weeks.
-            </p>
-          </div>
-          <div id="points-fields" class="points-fields">
-            <label class="field-label" for="points">Points</label>
-            <input
-              id="points"
-              name="points"
-              type="number"
-              min="0"
-              max="999"
-              value="1"
-              aria-label="Task point value"
-            />
-            <p class="field-hint">Reward value when a completion is approved.</p>
-          </div>
-          <details class="composer-more">
-            <summary>Description, steps &amp; standard photo</summary>
-            <label class="field-label" for="description">Description</label>
-            <textarea
-              id="description"
-              name="description"
-              rows="2"
-              maxlength="1000"
-              placeholder="Optional details"
-            ></textarea>
-            <label class="field-label" for="steps">Steps (one per line)</label>
-            <textarea
-              id="steps"
-              name="steps"
-              rows="3"
-              maxlength="2000"
-              placeholder="Clear surface&#10;Wipe with cloth&#10;Put items back"
-            ></textarea>
-            <label class="field-label" for="referencePhoto">What good looks like</label>
-            <div class="ref-photo-row">
-              <button type="button" id="reference-open-camera" class="ghost">
-                Open camera
-              </button>
-              <input
-                id="referencePhoto"
-                name="referencePhoto"
-                type="file"
-                accept="image/*"
-                capture="environment"
-                aria-label="Reference photo"
-              />
-            </div>
-            <p id="reference-camera-status" class="field-hint"></p>
-          </details>
-        </form>
-        <!-- Outside the form so status stays visible after Add closes the composer. -->
+        <!-- Outside the dialog so status stays visible after Add closes New task. -->
         <p id="form-status" class="form-status" role="status" aria-live="polite"></p>
       </div>
     </div>
+
+    <!-- Sheet (not inline dock) so iPad Safari can't leave the add card stuck covering the list. -->
+    <dialog id="composer-dialog" class="sheet composer-sheet">
+      <form id="add-form" class="composer sheet-body" autocomplete="off">
+        <div class="composer-head">
+          <p class="composer-heading">New task</p>
+          <button type="button" id="composer-close" class="ghost composer-close">
+            Close
+          </button>
+        </div>
+        <label class="composer-label" for="title">New chore</label>
+        <div class="composer-row">
+          <input
+            id="title"
+            name="title"
+            type="text"
+            enterkeyhint="done"
+            placeholder="What needs doing?"
+            required
+            maxlength="120"
+          />
+          <button type="submit" class="primary">Add</button>
+        </div>
+        <div class="composer-meta">
+          <input
+            id="assignee"
+            name="assignee"
+            type="text"
+            placeholder="Assign to… (optional)"
+            maxlength="40"
+            aria-label="Assignee"
+          />
+          <select id="kind" name="kind" aria-label="Repeat kind">
+            <option value="once">Once</option>
+            <option value="daily">Daily</option>
+            <option value="days_after">Every N days after done</option>
+            <option value="periodic">Every N weeks</option>
+          </select>
+          <input
+            id="dueDate"
+            name="dueDate"
+            type="date"
+            aria-label="Due date"
+          />
+        </div>
+        <div id="complete-by-fields" class="complete-by-fields hidden">
+          <label class="field-label" for="completeBy">Complete by</label>
+          <input
+            id="completeBy"
+            name="completeBy"
+            type="datetime-local"
+            aria-label="Complete by"
+          />
+          <p class="field-hint">
+            After this time, if it isn’t done, the task opens for anyone.
+          </p>
+        </div>
+        <div id="recurrence-fields" class="recurrence-fields hidden">
+          <label class="field-label" for="recurrenceInterval" id="recurrence-interval-label">Every</label>
+          <input
+            id="recurrenceInterval"
+            name="recurrenceInterval"
+            type="number"
+            min="1"
+            max="365"
+            value="4"
+            aria-label="Recurrence interval"
+          />
+          <span id="recurrence-unit-text" class="recurrence-unit-text">weeks</span>
+          <select id="recurrenceUnit" name="recurrenceUnit" class="hidden" aria-hidden="true" tabindex="-1">
+            <option value="week" selected>weeks</option>
+            <option value="day">days</option>
+          </select>
+          <p class="field-hint" id="recurrence-hint">
+            Default for weekly repeats is every 4 weeks.
+          </p>
+        </div>
+        <div id="points-fields" class="points-fields">
+          <label class="field-label" for="points">Points</label>
+          <input
+            id="points"
+            name="points"
+            type="number"
+            min="0"
+            max="999"
+            value="1"
+            aria-label="Task point value"
+          />
+          <p class="field-hint">Reward value when a completion is approved.</p>
+        </div>
+        <details class="composer-more">
+          <summary>Description, steps &amp; standard photo</summary>
+          <label class="field-label" for="description">Description</label>
+          <textarea
+            id="description"
+            name="description"
+            rows="2"
+            maxlength="1000"
+            placeholder="Optional details"
+          ></textarea>
+          <label class="field-label" for="steps">Steps (one per line)</label>
+          <textarea
+            id="steps"
+            name="steps"
+            rows="3"
+            maxlength="2000"
+            placeholder="Clear surface&#10;Wipe with cloth&#10;Put items back"
+          ></textarea>
+          <label class="field-label" for="referencePhoto">What good looks like</label>
+          <div class="ref-photo-row">
+            <button type="button" id="reference-open-camera" class="ghost">
+              Open camera
+            </button>
+            <input
+              id="referencePhoto"
+              name="referencePhoto"
+              type="file"
+              accept="image/*"
+              capture="environment"
+              aria-label="Reference photo"
+            />
+          </div>
+          <p id="reference-camera-status" class="field-hint"></p>
+        </details>
+      </form>
+    </dialog>
 
     <dialog id="task-dialog" class="sheet task-sheet">
       <div class="sheet-body" id="task-card">
@@ -218,7 +222,10 @@
           <button type="button" id="task-card-close" class="ghost">Close</button>
         </div>
         <div id="task-card-body"></div>
-        <div id="task-card-actions" class="task-card-actions"></div>
+        <div id="task-card-actions" class="task-card-actions">
+          <div class="task-card-actions-left"></div>
+          <div class="task-card-actions-right"></div>
+        </div>
       </div>
     </dialog>
 
@@ -401,7 +408,7 @@
       </div>
     </dialog>
 
-    <script src="./config.js?v=20261030b"></script>
-    <script src="./app.js?v=20261030b" type="module"></script>
+    <script src="./config.js?v=20261030c"></script>
+    <script src="./app.js?v=20261030c" type="module"></script>
   </body>
 </html>

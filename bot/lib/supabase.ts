@@ -91,12 +91,17 @@ export async function supabaseRest<T = unknown>(
 }
 
 function rowToPerson(row: Record<string, unknown>): Person {
+  const color =
+    typeof row.color === "string" && /^#[0-9A-Fa-f]{6}$/.test(row.color.trim())
+      ? row.color.trim().toLowerCase()
+      : undefined;
   return {
     id: String(row.id),
     displayName: String(row.display_name),
     role: row.role as Person["role"],
     active: Boolean(row.active),
     createdAt: String(row.created_at),
+    ...(color ? { color } : {}),
   };
 }
 

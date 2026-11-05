@@ -1,6 +1,7 @@
 const listEl = document.querySelector("#chore-list");
 const scoreboardEl = document.querySelector("#scoreboard");
 const peoplePanelEl = document.querySelector("#people-panel");
+const managePanelEl = document.querySelector("#manage-panel");
 const emptyEl = document.querySelector("#empty-state");
 const summaryEl = document.querySelector("#summary");
 const composerDock = document.querySelector("#composer-dock");
@@ -198,6 +199,8 @@ let openColorEditorPersonId = null;
 let templatesById = new Map();
 /** @type {Array<Record<string, unknown>>} */
 let completions = [];
+/** @type {Array<{id: string, personId: string, points: number, reason?: string, createdAt: string, createdByPersonId?: string}>} */
+let pointsAdjustments = [];
 /** @type {Array<{personId: string, displayName: string, role: string, points: number}>} */
 let scoreRows = [];
 /** @type {Array<{id: string, weekEnding: string, periodLabel?: string, personId: string, displayName: string, points: number}>} */
@@ -461,7 +464,12 @@ function formatAddError(error) {
 function showCreatedTaskOnList(created) {
   if (!created) return;
   rememberCreatedChore(created);
-  if (filter === "done" || filter === "scores" || filter === "people") {
+  if (
+    filter === "done" ||
+    filter === "scores" ||
+    filter === "people" ||
+    filter === "manage"
+  ) {
     filter = "open";
     filterButtons.forEach((item) => {
       const active = item.dataset.filter === "open";
@@ -665,6 +673,7 @@ function writeSwrCache() {
       people,
       scoreRows,
       pointsHistory,
+      pointsAdjustments,
       lastPointsResetAt,
       openChores: openViews,
       allChores: chores,
@@ -685,6 +694,9 @@ function paintFromSwrCache() {
   pointsHistory = Array.isArray(cached.pointsHistory)
     ? mapHistoryRows(cached.pointsHistory)
     : [];
+  pointsAdjustments = Array.isArray(cached.pointsAdjustments)
+    ? mapAdjustmentRows(cached.pointsAdjustments)
+    : [];
   lastPointsResetAt = cached.lastPointsResetAt ?? null;
   if (filter === "open" && Array.isArray(cached.openChores)) {
     chores = cached.openChores;
@@ -702,7 +714,9 @@ function paintFromSwrCache() {
       ? "Cached scores — refreshing…"
       : filter === "people"
         ? "Cached people — refreshing…"
-        : "Showing cached list — refreshing…";
+        : filter === "manage"
+          ? "Cached manage — refreshing…"
+          : "Showing cached list — refreshing…";
   return true;
 }
 
@@ -1008,6 +1022,20 @@ function isMissingColumnError(error, column) {
   );
 }
 
+function isMissingTableError(error, table) {
+  const message = String(error?.message || error || "");
+  const code = String(error?.code || "");
+  if (code === "PGRST205" || code === "42P01") return true;
+  if (/Could not find the table/i.test(message)) {
+    if (!table) return true;
+    return new RegExp(table, "i").test(message);
+  }
+  if (table && new RegExp(`relation ["']?public\\.${table}`, "i").test(message)) {
+    return true;
+  }
+  return false;
+}
+
 /**
  * PATCH/POST helper: if PostgREST rejects an optional column (e.g. complete_by
  * not yet migrated), retry once without that key.
@@ -1072,10 +1100,16 @@ function awardTimeIso(event) {
 }
 
 /**
- * Current scoreboard = approved awards since last weekly reset (additive model).
- * Completions are never deleted; history rows hold closed-week totals.
+ * Current scoreboard = approved awards + signed adjustments since last weekly
+ * reset (additive model). Completions are never deleted; history rows hold
+ * closed-week totals.
  */
-function computeScoreboard(peopleList, completionList, sinceIso = null) {
+function computeScoreboard(
+  peopleList,
+  completionList,
+  sinceIso = null,
+  adjustmentList = [],
+) {
   const sinceMs =
     sinceIso && !Number.isNaN(Date.parse(sinceIso))
       ? Date.parse(sinceIso)
@@ -1092,6 +1126,18 @@ function computeScoreboard(peopleList, completionList, sinceIso = null) {
     }
     const add = Number(event.pointsAwarded ?? event.points_awarded ?? 0);
     totals.set(personId, (totals.get(personId) ?? 0) + add);
+  }
+  for (const adj of adjustmentList ?? []) {
+    const personId = adj.personId ?? adj.person_id;
+    if (!personId) continue;
+    if (sinceMs != null) {
+      const created = adj.createdAt ?? adj.created_at;
+      const createdMs = created ? Date.parse(created) : NaN;
+      if (Number.isNaN(createdMs) || createdMs < sinceMs) continue;
+    }
+    const delta = Number(adj.points ?? 0);
+    if (!Number.isFinite(delta) || delta === 0) continue;
+    totals.set(personId, (totals.get(personId) ?? 0) + delta);
   }
   return peopleList
     .map((person) => ({
@@ -1188,6 +1234,33 @@ function mapHistoryRows(rows) {
     points: Number(row.points ?? 0),
     createdAt: row.createdAt ?? row.created_at,
   }));
+}
+
+function mapAdjustmentRows(rows) {
+  return (rows ?? [])
+    .map((row) => {
+      const personId = row.personId ?? row.person_id;
+      const points = Number(row.points ?? 0);
+      if (!personId || !Number.isFinite(points) || points === 0) return null;
+      const createdAt = row.createdAt ?? row.created_at ?? new Date().toISOString();
+      const reasonRaw = row.reason;
+      const reason =
+        typeof reasonRaw === "string" && reasonRaw.trim()
+          ? reasonRaw.trim()
+          : undefined;
+      const createdBy =
+        row.createdByPersonId ?? row.created_by_person_id ?? undefined;
+      return {
+        id: row.id || newId("padj"),
+        personId,
+        points: Math.trunc(points),
+        ...(reason ? { reason } : {}),
+        createdAt,
+        ...(createdBy ? { createdByPersonId: createdBy } : {}),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
 }
 
 function groupHistoryByWeek(rows) {
@@ -1461,7 +1534,12 @@ function boardFingerprint(snapshot = null) {
 
 async function listLegacySupabase(status) {
   let path = "chores?select=*&order=created_at.desc";
-  if (status !== "all" && status !== "scores") {
+  if (
+    status !== "all" &&
+    status !== "scores" &&
+    status !== "people" &&
+    status !== "manage"
+  ) {
     path += `&status=eq.${encodeURIComponent(status)}`;
   }
   const rows = await supabaseRequest(path);
@@ -1568,6 +1646,24 @@ async function fetchPointsHistoryRich() {
   }
 }
 
+async function fetchPointsAdjustmentsRich() {
+  try {
+    const rows = await supabaseRequest(
+      "points_adjustments?select=*&order=created_at.desc",
+    );
+    return mapAdjustmentRows(rows);
+  } catch (error) {
+    if (isMissingTableError(error, "points_adjustments")) {
+      console.warn(
+        "points_adjustments missing — run supabase/points-adjustments.sql",
+      );
+      return [];
+    }
+    console.warn("points_adjustments fetch failed", error);
+    return [];
+  }
+}
+
 async function upsertPointsHistoryRich(historyRows) {
   if (!historyRows.length) return;
   const payload = historyRows.map((row) => ({
@@ -1621,7 +1717,12 @@ async function writeHouseholdMetaReset(nextLastResetAt, timezone) {
  * Snapshots current period totals into points_history, then advances
  * last_points_reset_at so the live board = awards since that cursor.
  */
-async function maybeWeeklyPointsResetRich(peopleList, completionList, metaRow) {
+async function maybeWeeklyPointsResetRich(
+  peopleList,
+  completionList,
+  metaRow,
+  adjustmentList = [],
+) {
   if (!metaRow) return { lastResetAt: null, history: pointsHistory };
   householdTimezone =
     (metaRow.timezone && String(metaRow.timezone).trim()) ||
@@ -1632,12 +1733,19 @@ async function maybeWeeklyPointsResetRich(peopleList, completionList, metaRow) {
 
   if (!lastReset) {
     const thisWeek = new Map(
-      computeScoreboard(peopleList, completionList, weekStartIso).map((r) => [
-        r.personId,
-        r.points,
-      ]),
+      computeScoreboard(
+        peopleList,
+        completionList,
+        weekStartIso,
+        adjustmentList,
+      ).map((r) => [r.personId, r.points]),
     );
-    const historyRows = computeScoreboard(peopleList, completionList, null)
+    const historyRows = computeScoreboard(
+      peopleList,
+      completionList,
+      null,
+      adjustmentList,
+    )
       .map((row) => ({
         id: newId("ph"),
         weekEnding: weekStartIso,
@@ -1671,15 +1779,18 @@ async function maybeWeeklyPointsResetRich(peopleList, completionList, metaRow) {
   }
 
   const sinceWeek = new Map(
-    computeScoreboard(peopleList, completionList, weekStartIso).map((r) => [
-      r.personId,
-      r.points,
-    ]),
+    computeScoreboard(
+      peopleList,
+      completionList,
+      weekStartIso,
+      adjustmentList,
+    ).map((r) => [r.personId, r.points]),
   );
   const historyRows = computeScoreboard(
     peopleList,
     completionList,
     lastReset,
+    adjustmentList,
   )
     .map((row) => ({
       id: newId("ph"),
@@ -1797,14 +1908,21 @@ function retireAgentTestJunkLocal(store) {
  * still matches (drops in-flight poll results that would overwrite a newer save).
  */
 async function fetchRichBoard(status) {
-  const [instanceRows, templateRows, peopleRows, completionRows, metaRow] =
-    await Promise.all([
-      supabaseRequest("task_instances?select=*&order=created_at.desc"),
-      supabaseRequest("task_templates?select=*&order=created_at.desc"),
-      supabaseRequest("people?select=*&order=display_name.asc"),
-      supabaseRequest("completion_events?select=*&order=completed_at.desc"),
-      fetchHouseholdMetaRich(),
-    ]);
+  const [
+    instanceRows,
+    templateRows,
+    peopleRows,
+    completionRows,
+    metaRow,
+    nextAdjustments,
+  ] = await Promise.all([
+    supabaseRequest("task_instances?select=*&order=created_at.desc"),
+    supabaseRequest("task_templates?select=*&order=created_at.desc"),
+    supabaseRequest("people?select=*&order=display_name.asc"),
+    supabaseRequest("completion_events?select=*&order=completed_at.desc"),
+    fetchHouseholdMetaRich(),
+    fetchPointsAdjustmentsRich(),
+  ]);
   const nextPeople = (peopleRows ?? [])
     .map((row) => toPersonView(row))
     .filter(Boolean);
@@ -1817,11 +1935,13 @@ async function fetchRichBoard(status) {
     nextPeople,
     nextCompletions,
     metaRow,
+    nextAdjustments,
   );
   const nextScoreRows = computeScoreboard(
     nextPeople,
     nextCompletions,
     reset.lastResetAt,
+    nextAdjustments,
   );
 
   let rows = instanceRows;
@@ -1839,6 +1959,7 @@ async function fetchRichBoard(status) {
     people: nextPeople,
     templatesById: nextTemplates,
     completions: nextCompletions,
+    pointsAdjustments: nextAdjustments,
     scoreRows: nextScoreRows,
     pointsHistory: reset.history,
     lastPointsResetAt: reset.lastResetAt,
@@ -1856,6 +1977,7 @@ async function listRichSupabase(status) {
   people = board.people;
   templatesById = board.templatesById;
   completions = board.completions;
+  pointsAdjustments = board.pointsAdjustments;
   scoreRows = board.scoreRows;
   pointsHistory = board.pointsHistory;
   lastPointsResetAt = board.lastPointsResetAt;
@@ -2192,7 +2314,12 @@ async function updatePersonRole(personId, role) {
     people = people
       .map((p) => (p.id === personId ? { ...p, role } : p))
       .sort((a, b) => a.displayName.localeCompare(b.displayName));
-    scoreRows = computeScoreboard(people, completions, lastPointsResetAt);
+    scoreRows = computeScoreboard(
+      people,
+      completions,
+      lastPointsResetAt,
+      pointsAdjustments,
+    );
     return;
   }
   if (backend === "local") {
@@ -2204,10 +2331,102 @@ async function updatePersonRole(personId, role) {
     people = store.people.map((p) => toPersonView(p)).filter(Boolean);
     const since =
       store.householdMeta?.lastPointsResetAt ?? lastPointsResetAt;
-    scoreRows = computeScoreboard(people, store.completions, since);
+    pointsAdjustments = mapAdjustmentRows(store.pointsAdjustments ?? []);
+    scoreRows = computeScoreboard(
+      people,
+      store.completions,
+      since,
+      pointsAdjustments,
+    );
     return;
   }
   throw new Error("Managing people needs rich Supabase or local mode.");
+}
+
+/**
+ * Admin correction: signed delta (positive add / negative remove).
+ * Persists to points_adjustments so the weekly scoreboard includes it.
+ */
+async function addPointsAdjustment(personId, signedPoints, reasonRaw = "") {
+  if (!ADMIN_UI_MODE && !isAdmin()) {
+    throw new Error("Admin mode required to adjust points.");
+  }
+  const person = people.find((p) => p.id === personId);
+  if (!person) throw new Error("Choose a person to adjust.");
+  const delta = Math.trunc(Number(signedPoints));
+  if (!Number.isFinite(delta) || delta === 0) {
+    throw new Error("Enter a non-zero points amount.");
+  }
+  if (Math.abs(delta) > 9999) {
+    throw new Error("Adjustment must be between −9999 and 9999.");
+  }
+  const reason =
+    typeof reasonRaw === "string" && reasonRaw.trim()
+      ? reasonRaw.trim().slice(0, 200)
+      : undefined;
+  const createdBy = currentPerson()?.id ?? null;
+  const now = new Date().toISOString();
+  const row = {
+    id: newId("padj"),
+    personId,
+    points: delta,
+    ...(reason ? { reason } : {}),
+    createdAt: now,
+    ...(createdBy ? { createdByPersonId: createdBy } : {}),
+  };
+
+  if (backend === "supabase-rich") {
+    try {
+      await supabaseRequest("points_adjustments", {
+        method: "POST",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({
+          id: row.id,
+          person_id: personId,
+          points: delta,
+          reason: reason ?? null,
+          created_at: now,
+          created_by_person_id: createdBy,
+        }),
+      });
+    } catch (error) {
+      if (isMissingTableError(error, "points_adjustments")) {
+        throw new Error(
+          "Points adjustments need the points_adjustments table — run supabase/points-adjustments.sql.",
+        );
+      }
+      throw error;
+    }
+    pointsAdjustments = [row, ...pointsAdjustments.filter((a) => a.id !== row.id)];
+    scoreRows = computeScoreboard(
+      people,
+      completions,
+      lastPointsResetAt,
+      pointsAdjustments,
+    );
+    return row;
+  }
+
+  if (backend === "local") {
+    const store = loadLocalV2();
+    const nextAdj = mapAdjustmentRows([
+      row,
+      ...(store.pointsAdjustments ?? []),
+    ]);
+    const next = { ...store, pointsAdjustments: nextAdj };
+    saveLocalV2(next);
+    pointsAdjustments = nextAdj;
+    lastPointsResetAt = next.householdMeta?.lastPointsResetAt ?? lastPointsResetAt;
+    scoreRows = computeScoreboard(
+      people,
+      next.completions,
+      lastPointsResetAt,
+      pointsAdjustments,
+    );
+    return row;
+  }
+
+  throw new Error("Adjusting points needs rich Supabase or local mode.");
 }
 
 /**
@@ -2540,6 +2759,23 @@ async function updateLegacySupabase(id, patch) {
   return rowToLegacyChore(rows[0]);
 }
 
+function emptyLocalV2() {
+  return {
+    people: [],
+    templates: [],
+    instances: [],
+    completions: [],
+    pointsHistory: [],
+    pointsAdjustments: [],
+    householdMeta: {
+      id: HOUSEHOLD_META_ID,
+      timezone: DEFAULT_HOUSEHOLD_TIMEZONE,
+      lastPointsResetAt: null,
+      updatedAt: new Date(0).toISOString(),
+    },
+  };
+}
+
 function loadLocalV2() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY_V2);
@@ -2552,6 +2788,9 @@ function loadLocalV2() {
         completions: Array.isArray(parsed.completions) ? parsed.completions : [],
         pointsHistory: Array.isArray(parsed.pointsHistory)
           ? mapHistoryRows(parsed.pointsHistory)
+          : [],
+        pointsAdjustments: Array.isArray(parsed.pointsAdjustments)
+          ? mapAdjustmentRows(parsed.pointsAdjustments)
           : [],
         householdMeta: parsed.householdMeta ?? {
           id: HOUSEHOLD_META_ID,
@@ -2567,19 +2806,7 @@ function loadLocalV2() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY_V1);
     if (!raw) {
-      return {
-        people: [],
-        templates: [],
-        instances: [],
-        completions: [],
-        pointsHistory: [],
-        householdMeta: {
-          id: HOUSEHOLD_META_ID,
-          timezone: DEFAULT_HOUSEHOLD_TIMEZONE,
-          lastPointsResetAt: null,
-          updatedAt: new Date(0).toISOString(),
-        },
-      };
+      return emptyLocalV2();
     }
     const parsed = JSON.parse(raw);
     const legacy = Array.isArray(parsed?.chores) ? parsed.chores : [];
@@ -2596,32 +2823,11 @@ function loadLocalV2() {
       source: "manual",
     }));
     return {
-      people: [],
-      templates: [],
+      ...emptyLocalV2(),
       instances,
-      completions: [],
-      pointsHistory: [],
-      householdMeta: {
-        id: HOUSEHOLD_META_ID,
-        timezone: DEFAULT_HOUSEHOLD_TIMEZONE,
-        lastPointsResetAt: null,
-        updatedAt: new Date(0).toISOString(),
-      },
     };
   } catch {
-    return {
-      people: [],
-      templates: [],
-      instances: [],
-      completions: [],
-      pointsHistory: [],
-      householdMeta: {
-        id: HOUSEHOLD_META_ID,
-        timezone: DEFAULT_HOUSEHOLD_TIMEZONE,
-        lastPointsResetAt: null,
-        updatedAt: new Date(0).toISOString(),
-      },
-    };
+    return emptyLocalV2();
   }
 }
 
@@ -2701,6 +2907,7 @@ function applyLocalWeeklyPointsReset(store) {
   const peopleList = (store.people ?? [])
     .map((p) => toPersonView(p))
     .filter(Boolean);
+  const adjustmentList = mapAdjustmentRows(store.pointsAdjustments ?? []);
   const history = [...(store.pointsHistory ?? [])];
 
   const pushHistory = (rows) => {
@@ -2718,12 +2925,15 @@ function applyLocalWeeklyPointsReset(store) {
 
   if (!lastReset) {
     const thisWeek = new Map(
-      computeScoreboard(peopleList, store.completions, weekStartIso).map(
-        (r) => [r.personId, r.points],
-      ),
+      computeScoreboard(
+        peopleList,
+        store.completions,
+        weekStartIso,
+        adjustmentList,
+      ).map((r) => [r.personId, r.points]),
     );
     pushHistory(
-      computeScoreboard(peopleList, store.completions, null)
+      computeScoreboard(peopleList, store.completions, null, adjustmentList)
         .map((row) => ({
           id: newId("ph"),
           weekEnding: weekStartIso,
@@ -2738,6 +2948,7 @@ function applyLocalWeeklyPointsReset(store) {
     const next = {
       ...store,
       pointsHistory: history,
+      pointsAdjustments: adjustmentList,
       householdMeta: {
         ...meta,
         timezone: householdTimezone,
@@ -2756,14 +2967,16 @@ function applyLocalWeeklyPointsReset(store) {
   }
 
   const sinceWeek = new Map(
-    computeScoreboard(peopleList, store.completions, weekStartIso).map((r) => [
-      r.personId,
-      r.points,
-    ]),
+    computeScoreboard(
+      peopleList,
+      store.completions,
+      weekStartIso,
+      adjustmentList,
+    ).map((r) => [r.personId, r.points]),
   );
   const periodLabel = periodLabelForWeekEnding(weekStartIso, householdTimezone);
   pushHistory(
-    computeScoreboard(peopleList, store.completions, lastReset)
+    computeScoreboard(peopleList, store.completions, lastReset, adjustmentList)
       .map((row) => ({
         id: newId("ph"),
         weekEnding: weekStartIso,
@@ -2778,6 +2991,7 @@ function applyLocalWeeklyPointsReset(store) {
   const next = {
     ...store,
     pointsHistory: history,
+    pointsAdjustments: adjustmentList,
     householdMeta: {
       ...meta,
       timezone: householdTimezone,
@@ -2814,11 +3028,17 @@ function listLocal(status) {
     ]),
   );
   completions = store.completions;
+  pointsAdjustments = mapAdjustmentRows(store.pointsAdjustments ?? []);
   pointsHistory = mapHistoryRows(store.pointsHistory ?? []);
   lastPointsResetAt = store.householdMeta?.lastPointsResetAt ?? null;
   householdTimezone =
     store.householdMeta?.timezone?.trim() || DEFAULT_HOUSEHOLD_TIMEZONE;
-  scoreRows = computeScoreboard(people, completions, lastPointsResetAt);
+  scoreRows = computeScoreboard(
+    people,
+    completions,
+    lastPointsResetAt,
+    pointsAdjustments,
+  );
   const views = store.instances.map((row) => {
     const normalized = {
       id: row.id,
@@ -2839,7 +3059,14 @@ function listLocal(status) {
       normalized.template_id ? templatesById.get(normalized.template_id) : null,
     );
   });
-  if (status === "scores" || status === "all") return views;
+  if (
+    status === "scores" ||
+    status === "all" ||
+    status === "people" ||
+    status === "manage"
+  ) {
+    return views;
+  }
   if (status === "done") {
     return views.filter((c) => c.instanceStatus === "done");
   }
@@ -2928,11 +3155,222 @@ function roleLabel(role) {
   return "Child";
 }
 
+function formatAdjustmentWhen(iso) {
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return "";
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(new Date(ms));
+  } catch {
+    return new Date(ms).toLocaleString();
+  }
+}
+
+function adjustmentsThisWeek(list = pointsAdjustments, sinceIso = lastPointsResetAt) {
+  const sinceMs =
+    sinceIso && !Number.isNaN(Date.parse(sinceIso))
+      ? Date.parse(sinceIso)
+      : null;
+  return (list ?? []).filter((row) => {
+    if (sinceMs == null) return true;
+    const createdMs = Date.parse(row.createdAt);
+    return !Number.isNaN(createdMs) && createdMs >= sinceMs;
+  });
+}
+
+function renderManagePanel() {
+  listEl.innerHTML = "";
+  listEl.classList.add("hidden");
+  peoplePanelEl.classList.add("hidden");
+  peoplePanelEl.innerHTML = "";
+  scoreboardEl.classList.add("hidden");
+  scoreboardEl.innerHTML = "";
+  managePanelEl.classList.remove("hidden");
+  managePanelEl.innerHTML = "";
+  emptyEl.classList.add("hidden");
+  fillMeSelect();
+
+  summaryEl.textContent =
+    people.length === 0
+      ? "Add people first, then correct weekly points here."
+      : "Admin corrections — add or remove points for this week’s scoreboard.";
+
+  if (people.length === 0) {
+    emptyEl.textContent = "No people yet. Add someone under People.";
+    emptyEl.classList.remove("hidden");
+    return;
+  }
+
+  const formBlock = document.createElement("div");
+  formBlock.className = "manage-block";
+  const formTitle = document.createElement("p");
+  formTitle.className = "field-label";
+  formTitle.textContent = "Adjust points";
+  const form = document.createElement("div");
+  form.className = "manage-form";
+  const row = document.createElement("div");
+  row.className = "manage-form-row";
+
+  const personSelect = document.createElement("select");
+  personSelect.setAttribute("aria-label", "Person to adjust");
+  personSelect.id = "manage-person";
+  const blank = document.createElement("option");
+  blank.value = "";
+  blank.textContent = "Choose a person…";
+  personSelect.append(blank);
+  for (const person of people) {
+    const opt = document.createElement("option");
+    opt.value = person.id;
+    const weekPts =
+      scoreRows.find((r) => r.personId === person.id)?.points ?? 0;
+    opt.textContent = `${person.displayName} (${weekPts} this week)`;
+    personSelect.append(opt);
+  }
+
+  const amountInput = document.createElement("input");
+  amountInput.type = "number";
+  amountInput.min = "1";
+  amountInput.max = "9999";
+  amountInput.step = "1";
+  amountInput.value = "1";
+  amountInput.id = "manage-amount";
+  amountInput.setAttribute("aria-label", "Points amount");
+  amountInput.placeholder = "Pts";
+
+  const reasonInput = document.createElement("input");
+  reasonInput.type = "text";
+  reasonInput.maxLength = 200;
+  reasonInput.id = "manage-reason";
+  reasonInput.setAttribute("aria-label", "Reason");
+  reasonInput.placeholder = "Reason (optional)";
+
+  row.append(personSelect, amountInput, reasonInput);
+
+  const actions = document.createElement("div");
+  actions.className = "manage-actions";
+  const addBtn = document.createElement("button");
+  addBtn.type = "button";
+  addBtn.className = "primary";
+  addBtn.textContent = "Add points";
+  const removeBtn = document.createElement("button");
+  removeBtn.type = "button";
+  removeBtn.className = "danger";
+  removeBtn.textContent = "Remove points";
+
+  const runAdjust = (sign) => {
+    void (async () => {
+      const personId = personSelect.value;
+      const amount = Math.floor(Number(amountInput.value));
+      if (!personId) {
+        setStatus("Choose a person first.", { tone: "error" });
+        return;
+      }
+      if (!Number.isFinite(amount) || amount < 1) {
+        setStatus("Enter a positive points amount.", { tone: "error" });
+        amountInput.focus();
+        return;
+      }
+      addBtn.disabled = true;
+      removeBtn.disabled = true;
+      try {
+        const rowAdj = await addPointsAdjustment(
+          personId,
+          sign * amount,
+          reasonInput.value,
+        );
+        const who =
+          people.find((p) => p.id === personId)?.displayName || "Person";
+        setStatus(
+          sign > 0
+            ? `Added ${amount} pt${amount === 1 ? "" : "s"} for ${who}.`
+            : `Removed ${amount} pt${amount === 1 ? "" : "s"} from ${who}.`,
+          { tone: "ok" },
+        );
+        reasonInput.value = "";
+        writeSwrCache();
+        lastBoardFingerprint = boardFingerprint();
+        renderManagePanel();
+        void rowAdj;
+      } catch (error) {
+        setStatus(error.message, { tone: "error" });
+      } finally {
+        addBtn.disabled = false;
+        removeBtn.disabled = false;
+      }
+    })();
+  };
+
+  addBtn.addEventListener("click", () => runAdjust(1));
+  removeBtn.addEventListener("click", () => runAdjust(-1));
+  actions.append(addBtn, removeBtn);
+
+  const hint = document.createElement("p");
+  hint.className = "field-hint";
+  hint.textContent =
+    "Corrections count toward this week’s Scores tab. Pasted SQL creates points_adjustments on Supabase.";
+
+  form.append(row, actions, hint);
+  formBlock.append(formTitle, form);
+  managePanelEl.append(formBlock);
+
+  const weekAdj = adjustmentsThisWeek();
+  const listHeading = document.createElement("p");
+  listHeading.className = "score-section-label";
+  listHeading.textContent = "This week’s adjustments";
+  managePanelEl.append(listHeading);
+
+  if (weekAdj.length === 0) {
+    const none = document.createElement("p");
+    none.className = "field-hint";
+    none.textContent = "No manual adjustments yet this week.";
+    managePanelEl.append(none);
+    return;
+  }
+
+  const list = document.createElement("ul");
+  list.className = "manage-adjust-list";
+  for (const adj of weekAdj) {
+    const li = document.createElement("li");
+    li.className = "manage-adjust-row";
+    const meta = document.createElement("div");
+    meta.className = "manage-adjust-meta";
+    const name = document.createElement("p");
+    name.className = "manage-adjust-name";
+    name.textContent =
+      people.find((p) => p.id === adj.personId)?.displayName || adj.personId;
+    meta.append(name);
+    if (adj.reason) {
+      const reason = document.createElement("p");
+      reason.className = "manage-adjust-reason";
+      reason.textContent = adj.reason;
+      meta.append(reason);
+    }
+    const when = document.createElement("p");
+    when.className = "manage-adjust-when";
+    when.textContent = formatAdjustmentWhen(adj.createdAt);
+    meta.append(when);
+    const pts = document.createElement("div");
+    pts.className = "manage-adjust-points";
+    if (adj.points < 0) pts.classList.add("is-remove");
+    pts.textContent = adj.points > 0 ? `+${adj.points}` : String(adj.points);
+    pts.setAttribute("aria-label", `${adj.points} points`);
+    li.append(meta, pts);
+    list.append(li);
+  }
+  managePanelEl.append(list);
+}
+
 function renderScoreboard() {
   listEl.innerHTML = "";
   listEl.classList.add("hidden");
   peoplePanelEl.classList.add("hidden");
   peoplePanelEl.innerHTML = "";
+  if (managePanelEl) {
+    managePanelEl.classList.add("hidden");
+    managePanelEl.innerHTML = "";
+  }
   scoreboardEl.classList.remove("hidden");
   emptyEl.classList.add("hidden");
   scoreboardEl.innerHTML = "";
@@ -2943,7 +3381,7 @@ function renderScoreboard() {
   summaryEl.textContent =
     scoreRows.length === 0
       ? "Add household people to start the scoreboard."
-      : `Approved points this week.${weekHint}`;
+      : `Approved points this week (includes Manage adjustments).${weekHint}`;
 
   if (scoreRows.length === 0) {
     emptyEl.textContent = "No people yet. Add someone under People.";
@@ -3015,6 +3453,10 @@ function renderPeoplePanel() {
   listEl.classList.add("hidden");
   scoreboardEl.classList.add("hidden");
   scoreboardEl.innerHTML = "";
+  if (managePanelEl) {
+    managePanelEl.classList.add("hidden");
+    managePanelEl.innerHTML = "";
+  }
   peoplePanelEl.classList.remove("hidden");
   peoplePanelEl.innerHTML = "";
   emptyEl.classList.add("hidden");
@@ -3311,11 +3753,19 @@ function render() {
     renderPeoplePanel();
     return;
   }
+  if (filter === "manage") {
+    renderManagePanel();
+    return;
+  }
 
   scoreboardEl.classList.add("hidden");
   scoreboardEl.innerHTML = "";
   peoplePanelEl.classList.add("hidden");
   peoplePanelEl.innerHTML = "";
+  if (managePanelEl) {
+    managePanelEl.classList.add("hidden");
+    managePanelEl.innerHTML = "";
+  }
   listEl.classList.remove("hidden");
   listEl.innerHTML = "";
   emptyEl.classList.toggle("hidden", chores.length > 0);
@@ -3626,7 +4076,8 @@ function mergeRecentCreatesIntoList() {
 
 async function loadChores({ quiet = false } = {}) {
   const epoch = ++loadEpoch;
-  const statusKey = filter === "people" ? "all" : filter;
+  const statusKey =
+    filter === "people" || filter === "manage" ? "all" : filter;
 
   if (backend === "supabase-rich") {
     const board = await fetchRichBoard(statusKey);
@@ -3634,6 +4085,7 @@ async function loadChores({ quiet = false } = {}) {
     people = board.people;
     templatesById = board.templatesById;
     completions = board.completions;
+    pointsAdjustments = board.pointsAdjustments;
     scoreRows = board.scoreRows;
     pointsHistory = board.pointsHistory;
     lastPointsResetAt = board.lastPointsResetAt;
@@ -3650,6 +4102,7 @@ async function loadChores({ quiet = false } = {}) {
     if (epoch !== loadEpoch) return;
     chores = nextChores;
     scoreRows = [];
+    pointsAdjustments = [];
     mergeRecentCreatesIntoList();
     paintedFromCache = false;
     const fp = boardFingerprint();
@@ -3659,13 +4112,18 @@ async function loadChores({ quiet = false } = {}) {
     render();
   } else if (backend === "api") {
     const statusParam =
-      filter === "scores" || filter === "people" ? "all" : filter;
+      filter === "scores" ||
+      filter === "people" ||
+      filter === "manage"
+        ? "all"
+        : filter;
     const data = await api(
       `api/chores?status=${encodeURIComponent(statusParam)}`,
     );
     if (epoch !== loadEpoch) return;
     chores = (data.chores ?? []).map((c) => ({ ...c, mode: "legacy" }));
     scoreRows = [];
+    pointsAdjustments = [];
     mergeRecentCreatesIntoList();
     paintedFromCache = false;
     const fp = boardFingerprint();
@@ -3704,6 +4162,7 @@ function applyEditedChoreLocally(updated) {
   const showInFilter =
     filter === "all" ||
     filter === "people" ||
+    filter === "manage" ||
     filter === "scores" ||
     (filter === "open" && openLike) ||
     (filter === "done" &&
@@ -3837,10 +4296,12 @@ async function addHouseholdPerson(nameEl, roleEl) {
       lastPointsResetAt =
         store.householdMeta?.lastPointsResetAt ?? lastPointsResetAt;
       pointsHistory = mapHistoryRows(store.pointsHistory ?? []);
+      pointsAdjustments = mapAdjustmentRows(store.pointsAdjustments ?? []);
       scoreRows = computeScoreboard(
         people,
         store.completions,
         lastPointsResetAt,
+        pointsAdjustments,
       );
     } else {
       setStatus("Adding people needs rich Supabase schema or local mode.");
@@ -3854,7 +4315,9 @@ async function addHouseholdPerson(nameEl, roleEl) {
         ? `Added ${name} as parent (admin). Select them under “I am”.`
         : `Added ${name}.`,
     );
-    if (filter === "scores" || filter === "people") render();
+    if (filter === "scores" || filter === "people" || filter === "manage") {
+      render();
+    }
   } catch (error) {
     setStatus(error.message);
   }

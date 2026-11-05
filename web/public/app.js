@@ -96,6 +96,8 @@ const STORAGE_KEY_V2 = "chores.household.v2";
 const ME_KEY = "chores.me.personId";
 /** Stale-while-revalidate cache for list/scoreboard paint. */
 const SWR_CACHE_KEY = "chores.swr.v1";
+/** Local colour picks kept when people.color is not migrated yet. */
+const COLOR_OVERRIDES_KEY = "chores.people.colorOverrides.v1";
 const CONFIG = window.CHORES_CONFIG ?? {};
 const PROOF_TTL_DAYS = 7;
 const PHOTO_BUCKET = "chore-photos";
@@ -119,6 +121,57 @@ const DEFAULT_PERSON_COLORS = [
 ];
 const HEX_COLOR_RE = /^#[0-9A-Fa-f]{6}$/;
 const DEFAULT_THEME_COLOR = "#1f6f5b";
+/** Paste into School Compass Supabase → SQL → New query → Run. */
+const PEOPLE_COLOR_SQL = `-- Adds people.color (#RRGGBB) for identity page-background tinting.
+-- Safe to re-run. Also in repo supabase/people-color-column.sql.
+
+alter table public.people add column if not exists color text;
+
+update public.people as p
+set color = d.color
+from (
+  select
+    id,
+    (array[
+      '#3d8b6e',
+      '#c46b3a',
+      '#3a7ca5',
+      '#b85c7a',
+      '#8a7a3d',
+      '#2e8b8b',
+      '#c49a3a',
+      '#6d7f9c'
+    ])[
+      ((row_number() over (order by created_at nulls last, id) - 1) % 8) + 1
+    ] as color
+  from public.people
+) as d
+where p.id = d.id
+  and (
+    p.color is null
+    or btrim(p.color) = ''
+    or p.color !~ '^#[0-9A-Fa-f]{6}$'
+  );
+
+alter table public.people
+  alter column color set default '#3d8b6e';
+
+update public.people set color = '#3d8b6e' where color is null;
+
+alter table public.people
+  alter column color set not null;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'people_color_hex_check'
+  ) then
+    alter table public.people
+      add constraint people_color_hex_check
+      check (color ~ '^#[0-9A-Fa-f]{6}$');
+  end if;
+end $$;`;
 /**
  * v1 product default: treat the Pages UI as full parent/admin mode.
  * Real logins + password-reset authority come later (see chore-model-plan).
@@ -137,6 +190,10 @@ const recentCreates = new Map();
 let chores = [];
 /** @type {Array<{id: string, displayName: string, role: string, color: string}>} */
 let people = [];
+/** True when PostgREST reports people.color missing (schema not migrated). */
+let peopleColorColumnMissing = false;
+/** Person id with the inline colour editor open, or null. */
+let openColorEditorPersonId = null;
 /** @type {Map<string, Record<string, unknown>>} */
 let templatesById = new Map();
 /** @type {Array<Record<string, unknown>>} */
@@ -455,6 +512,41 @@ function normalizePersonColor(value) {
   return trimmed.toLowerCase();
 }
 
+function loadColorOverrides() {
+  try {
+    const raw = localStorage.getItem(COLOR_OVERRIDES_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    /** @type {Record<string, string>} */
+    const out = {};
+    for (const [id, value] of Object.entries(parsed)) {
+      const color = normalizePersonColor(value);
+      if (color) out[id] = color;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function saveColorOverride(personId, color) {
+  const next = { ...loadColorOverrides(), [personId]: color };
+  localStorage.setItem(COLOR_OVERRIDES_KEY, JSON.stringify(next));
+}
+
+function clearColorOverride(personId) {
+  const next = { ...loadColorOverrides() };
+  if (!(personId in next)) return;
+  delete next[personId];
+  localStorage.setItem(COLOR_OVERRIDES_KEY, JSON.stringify(next));
+}
+
+function peopleColorSqlReminder() {
+  return "People colour needs the people.color column — paste supabase/people-color-column.sql in Supabase SQL, then refresh.";
+}
+
 function pickDefaultPersonColor(existing = people) {
   const used = new Set(
     (existing || [])
@@ -481,8 +573,11 @@ function defaultColorForId(personId) {
 function toPersonView(row) {
   if (!row || typeof row !== "object") return null;
   const id = String(row.id);
+  const overrides = loadColorOverrides();
   const color =
-    normalizePersonColor(row.color) || defaultColorForId(id);
+    normalizePersonColor(overrides[id]) ||
+    normalizePersonColor(row.color) ||
+    defaultColorForId(id);
   return {
     id,
     displayName: row.displayName ?? row.display_name,
@@ -2115,29 +2210,47 @@ async function updatePersonRole(personId, role) {
   throw new Error("Managing people needs rich Supabase or local mode.");
 }
 
+/**
+ * Persist a person colour. Always updates local people + I-am tint.
+ * When people.color is missing, keeps a device override and returns needsSql.
+ * @returns {Promise<{ persisted: boolean, needsSql?: boolean }>}
+ */
 async function updatePersonColor(personId, colorRaw) {
   const color = normalizePersonColor(colorRaw);
   if (!color) throw new Error("Colour must be a hex value like #3d8b6e.");
+
+  const applyLocal = () => {
+    people = people
+      .map((p) => (p.id === personId ? { ...p, color } : p))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
+    syncIdentityBackground();
+  };
+
   if (backend === "supabase-rich") {
+    if (peopleColorColumnMissing) {
+      saveColorOverride(personId, color);
+      applyLocal();
+      return { persisted: false, needsSql: true };
+    }
     try {
       await supabaseRequest(`people?id=eq.${encodeURIComponent(personId)}`, {
         method: "PATCH",
         headers: { Prefer: "return=minimal" },
         body: JSON.stringify({ color }),
       });
+      peopleColorColumnMissing = false;
+      clearColorOverride(personId);
+      applyLocal();
+      return { persisted: true };
     } catch (error) {
       if (isMissingColumnError(error, "color")) {
-        throw new Error(
-          "People colour needs the people.color column — run supabase/people-color-column.sql.",
-        );
+        peopleColorColumnMissing = true;
+        saveColorOverride(personId, color);
+        applyLocal();
+        return { persisted: false, needsSql: true };
       }
       throw error;
     }
-    people = people
-      .map((p) => (p.id === personId ? { ...p, color } : p))
-      .sort((a, b) => a.displayName.localeCompare(b.displayName));
-    syncIdentityBackground();
-    return;
   }
   if (backend === "local") {
     const store = loadLocalV2();
@@ -2147,9 +2260,26 @@ async function updatePersonColor(personId, colorRaw) {
     saveLocalV2(store);
     people = store.people.map((p) => toPersonView(p)).filter(Boolean);
     syncIdentityBackground();
-    return;
+    return { persisted: true };
   }
   throw new Error("Managing people needs rich Supabase or local mode.");
+}
+
+async function probePeopleColorColumn() {
+  if (backend !== "supabase-rich") {
+    peopleColorColumnMissing = false;
+    return;
+  }
+  try {
+    await supabaseRequest("people?select=color&limit=1");
+    peopleColorColumnMissing = false;
+  } catch (error) {
+    if (isMissingColumnError(error, "color")) {
+      peopleColorColumnMissing = true;
+      return;
+    }
+    console.warn("people.color probe failed", error);
+  }
 }
 
 async function addLegacySupabase(input) {
@@ -2935,6 +3065,10 @@ function renderPeoplePanel() {
   addBlock.append(addTitle, row, hint);
   peoplePanelEl.append(addBlock);
 
+  if (peopleColorColumnMissing) {
+    peoplePanelEl.append(buildPeopleColorSqlBanner());
+  }
+
   if (people.length === 0) {
     emptyEl.textContent = "No people yet. Add a parent or child above.";
     emptyEl.classList.remove("hidden");
@@ -2944,65 +3078,222 @@ function renderPeoplePanel() {
   const list = document.createElement("ul");
   list.className = "people-list";
   for (const person of people) {
-    const li = document.createElement("li");
-    li.className = "people-row";
-    const left = document.createElement("div");
-    left.className = "people-name-line";
-    const color = document.createElement("input");
-    color.type = "color";
-    color.className = "people-color";
-    color.value = normalizePersonColor(person.color) || defaultColorForId(person.id);
-    color.setAttribute("aria-label", `Colour for ${person.displayName}`);
-    color.title = "Page colour when this person is selected in I am";
-    color.addEventListener("change", () => {
-      void (async () => {
-        const previous = person.color;
-        try {
-          await updatePersonColor(person.id, color.value);
-          setStatus(`Updated colour for ${person.displayName}.`);
-          writeSwrCache();
-          fillMeSelect();
-        } catch (error) {
-          setStatus(error.message);
-          color.value = previous || defaultColorForId(person.id);
-        }
-      })();
-    });
-    const name = document.createElement("p");
-    name.className = "people-name";
-    name.textContent = person.displayName;
-    left.append(color, name);
-    const role = document.createElement("select");
-    role.setAttribute("aria-label", `Role for ${person.displayName}`);
-    for (const [value, label] of [
-      ["child", "Child"],
-      ["parent", "Parent (admin)"],
-      ["other", "Other"],
-    ]) {
-      const opt = document.createElement("option");
-      opt.value = value;
-      opt.textContent = label;
-      if (person.role === value) opt.selected = true;
-      role.append(opt);
-    }
-    role.addEventListener("change", () => {
-      void (async () => {
-        try {
-          await updatePersonRole(person.id, role.value);
-          fillMeSelect();
-          setStatus(`Updated ${person.displayName}.`);
-          writeSwrCache();
-          renderPeoplePanel();
-        } catch (error) {
-          setStatus(error.message);
-          role.value = person.role;
-        }
-      })();
-    });
-    li.append(left, role);
-    list.append(li);
+    list.append(buildPeopleRow(person));
   }
   peoplePanelEl.append(list);
+}
+
+function buildPeopleColorSqlBanner() {
+  const banner = document.createElement("div");
+  banner.className = "people-sql-banner";
+  banner.setAttribute("role", "status");
+  const title = document.createElement("p");
+  title.className = "people-sql-title";
+  title.textContent = peopleColorSqlReminder();
+  const actions = document.createElement("div");
+  actions.className = "people-sql-actions";
+  const copyBtn = document.createElement("button");
+  copyBtn.type = "button";
+  copyBtn.className = "primary";
+  copyBtn.textContent = "Copy SQL";
+  copyBtn.addEventListener("click", () => {
+    void (async () => {
+      try {
+        await navigator.clipboard.writeText(PEOPLE_COLOR_SQL);
+        setStatus("SQL copied — paste in Supabase → SQL → Run.", {
+          tone: "ok",
+        });
+      } catch {
+        setStatus("Could not copy — select the SQL below and copy manually.", {
+          tone: "error",
+        });
+      }
+    })();
+  });
+  const details = document.createElement("details");
+  details.className = "people-sql-details";
+  const summary = document.createElement("summary");
+  summary.textContent = "Show pasteable SQL";
+  const pre = document.createElement("pre");
+  pre.className = "people-sql-pre";
+  pre.textContent = PEOPLE_COLOR_SQL;
+  details.append(summary, pre);
+  actions.append(copyBtn);
+  banner.append(title, actions, details);
+  return banner;
+}
+
+/**
+ * Apply a colour choice: persist (or local override), refresh I-am tint.
+ * @param {{id: string, displayName: string, color: string}} person
+ * @param {string} nextColor
+ */
+async function commitPersonColor(person, nextColor) {
+  const result = await updatePersonColor(person.id, nextColor);
+  writeSwrCache();
+  fillMeSelect();
+  if (result.needsSql) {
+    setStatus(peopleColorSqlReminder(), { tone: "error" });
+    if (filter === "people") renderPeoplePanel();
+    return;
+  }
+  setStatus(`Updated colour for ${person.displayName}.`, { tone: "ok" });
+  if (filter === "people") renderPeoplePanel();
+}
+
+function buildPeopleRow(person) {
+  const li = document.createElement("li");
+  li.className = "people-row";
+  const current =
+    normalizePersonColor(person.color) || defaultColorForId(person.id);
+  const editorOpen = openColorEditorPersonId === person.id;
+
+  const top = document.createElement("div");
+  top.className = "people-row-top";
+
+  const left = document.createElement("div");
+  left.className = "people-name-line";
+
+  const swatchBtn = document.createElement("button");
+  swatchBtn.type = "button";
+  swatchBtn.className = "people-color-swatch";
+  swatchBtn.style.setProperty("--swatch-color", current);
+  swatchBtn.setAttribute(
+    "aria-label",
+    `Choose colour for ${person.displayName}`,
+  );
+  swatchBtn.setAttribute("aria-expanded", editorOpen ? "true" : "false");
+  swatchBtn.title = "Page colour when this person is selected in I am";
+  swatchBtn.addEventListener("click", () => {
+    openColorEditorPersonId = editorOpen ? null : person.id;
+    renderPeoplePanel();
+  });
+
+  const name = document.createElement("p");
+  name.className = "people-name";
+  name.textContent = person.displayName;
+  left.append(swatchBtn, name);
+
+  const role = document.createElement("select");
+  role.setAttribute("aria-label", `Role for ${person.displayName}`);
+  for (const [value, label] of [
+    ["child", "Child"],
+    ["parent", "Parent (admin)"],
+    ["other", "Other"],
+  ]) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    if (person.role === value) opt.selected = true;
+    role.append(opt);
+  }
+  role.addEventListener("change", () => {
+    void (async () => {
+      try {
+        await updatePersonRole(person.id, role.value);
+        fillMeSelect();
+        setStatus(`Updated ${person.displayName}.`);
+        writeSwrCache();
+        renderPeoplePanel();
+      } catch (error) {
+        setStatus(error.message, { tone: "error" });
+        role.value = person.role;
+      }
+    })();
+  });
+  top.append(left, role);
+  li.append(top);
+
+  if (editorOpen) {
+    li.append(buildPersonColorEditor(person, current));
+  }
+  return li;
+}
+
+function buildPersonColorEditor(person, currentColor) {
+  const editor = document.createElement("div");
+  editor.className = "people-color-editor";
+  editor.setAttribute("role", "group");
+  editor.setAttribute(
+    "aria-label",
+    `Colour picker for ${person.displayName}`,
+  );
+
+  const hint = document.createElement("p");
+  hint.className = "field-hint";
+  hint.textContent =
+    "Tap a colour to save it, or pick a custom colour and tap Save.";
+
+  const palette = document.createElement("div");
+  palette.className = "people-color-palette";
+  for (const preset of DEFAULT_PERSON_COLORS) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "people-color-chip";
+    chip.style.setProperty("--swatch-color", preset);
+    chip.setAttribute("aria-label", `Use ${preset}`);
+    if (preset.toLowerCase() === currentColor.toLowerCase()) {
+      chip.classList.add("is-selected");
+      chip.setAttribute("aria-current", "true");
+    }
+    chip.addEventListener("click", () => {
+      void (async () => {
+        try {
+          await commitPersonColor(person, preset);
+          openColorEditorPersonId = null;
+          renderPeoplePanel();
+        } catch (error) {
+          setStatus(error.message, { tone: "error" });
+        }
+      })();
+    });
+    palette.append(chip);
+  }
+
+  const customRow = document.createElement("div");
+  customRow.className = "people-color-custom";
+  const color = document.createElement("input");
+  color.type = "color";
+  color.className = "people-color";
+  color.value = currentColor;
+  color.setAttribute("aria-label", `Custom colour for ${person.displayName}`);
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "primary people-color-save";
+  saveBtn.textContent = "Save colour";
+  saveBtn.disabled = true;
+
+  const syncSaveEnabled = () => {
+    const next = normalizePersonColor(color.value);
+    saveBtn.disabled = !next || next === currentColor.toLowerCase();
+  };
+
+  const persistCustom = () => {
+    void (async () => {
+      const previous = currentColor;
+      try {
+        await commitPersonColor(person, color.value);
+        openColorEditorPersonId = null;
+        renderPeoplePanel();
+      } catch (error) {
+        setStatus(error.message, { tone: "error" });
+        color.value = previous;
+        syncSaveEnabled();
+      }
+    })();
+  };
+
+  // iOS/Safari often fire input while dragging; change when the picker closes.
+  color.addEventListener("input", syncSaveEnabled);
+  color.addEventListener("change", () => {
+    syncSaveEnabled();
+    if (!saveBtn.disabled) persistCustom();
+  });
+  saveBtn.addEventListener("click", persistCustom);
+
+  customRow.append(color, saveBtn);
+  editor.append(hint, palette, customRow);
+  return editor;
 }
 
 function render() {
@@ -4601,6 +4892,7 @@ void (async () => {
   backendReady = true;
   if (pendingReleaseIds.size > 0) schedulePersistReleases();
   if (backend === "supabase-rich") {
+    await probePeopleColorColumn();
     setStatus(
       paintedFromCache
         ? "Refreshing from Supabase…"
@@ -4617,7 +4909,10 @@ void (async () => {
   }
   await loadChores({ quiet: true });
   if (backend === "supabase" || backend === "supabase-rich") {
-    setStatus("Synced.");
+    setStatus(
+      peopleColorColumnMissing ? peopleColorSqlReminder() : "Synced.",
+      peopleColorColumnMissing ? { tone: "error" } : {},
+    );
   }
 })().catch((error) => {
   if (!paintedFromCache) {

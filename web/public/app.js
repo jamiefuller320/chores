@@ -124,6 +124,11 @@ const DEFAULT_THEME_COLOR = "#1f6f5b";
  * Real logins + password-reset authority come later (see chore-model-plan).
  */
 const ADMIN_UI_MODE = true;
+/**
+ * Agent/Puppeteer leftover titles from edit-persist demos. Retire on load so
+ * they never stick in the open list; never create these in product flows.
+ */
+const AGENT_TEST_TITLE_RE = /^EditPersist\b/i;
 
 let filter = "open";
 /** Recently created chores kept visible across brief Supabase read-after-write races. */
@@ -507,6 +512,28 @@ function isAdmin() {
   return isAdminRole(currentPerson()?.role);
 }
 
+function isAgentTestJunkTitle(title) {
+  return typeof title === "string" && AGENT_TEST_TITLE_RE.test(title.trim());
+}
+
+/** In admin UI mode, Mark done awards points immediately (no separate Approve). */
+function autoApproveOnComplete() {
+  return ADMIN_UI_MODE;
+}
+
+function awardPointsForChore(chore) {
+  const template = chore?.templateId
+    ? templatesById.get(chore.templateId)
+    : null;
+  const raw =
+    template?.points != null
+      ? template.points
+      : chore?.points != null
+        ? chore.points
+        : DEFAULT_TASK_POINTS;
+  return Math.max(0, Math.floor(Number(raw)));
+}
+
 function stepsToTextarea(steps) {
   if (!Array.isArray(steps) || steps.length === 0) return "";
   return [...steps]
@@ -531,10 +558,11 @@ function writeSwrCache() {
   try {
     const openViews = (chores || []).filter(
       (c) =>
-        c.instanceStatus === "noticed" ||
-        c.instanceStatus === "open" ||
-        c.instanceStatus === "assigned" ||
-        (c.status === "open" && !c.instanceStatus),
+        !isAgentTestJunkTitle(c.title) &&
+        (c.instanceStatus === "noticed" ||
+          c.instanceStatus === "open" ||
+          c.instanceStatus === "assigned" ||
+          (c.status === "open" && !c.instanceStatus)),
     );
     const payload = {
       savedAt: Date.now(),
@@ -1586,6 +1614,90 @@ async function maybeWeeklyPointsResetRich(peopleList, completionList, metaRow) {
 }
 
 /**
+ * Heal rows where Mark done wrote completed_at but status stayed open/assigned
+ * (leaves ghosts on the open list and confuses the scoreboard UX).
+ */
+async function healCompletedStillOpenRich(instanceRows) {
+  const broken = (instanceRows ?? []).filter((row) => {
+    const status = row.status;
+    return (
+      row.completed_at &&
+      (status === "open" || status === "assigned" || status === "noticed")
+    );
+  });
+  if (broken.length === 0) return false;
+  await Promise.all(
+    broken.map((row) =>
+      supabaseRequest(`task_instances?id=eq.${encodeURIComponent(row.id)}`, {
+        method: "PATCH",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({ status: "done" }),
+      }).catch((error) => {
+        console.warn("Heal completed-still-open failed", row.id, error);
+      }),
+    ),
+  );
+  return true;
+}
+
+/**
+ * Retire leftover Puppeteer/agent edit-persist demos so they leave the open list.
+ * Safe: only matches known junk title pattern; never touches real household titles.
+ */
+async function retireAgentTestJunkRich(instanceRows) {
+  const junk = (instanceRows ?? []).filter((row) => {
+    const status = row.status;
+    return (
+      isAgentTestJunkTitle(row.title) &&
+      (status === "open" || status === "assigned" || status === "noticed")
+    );
+  });
+  if (junk.length === 0) return false;
+  await Promise.all(
+    junk.map((row) =>
+      supabaseRequest(`task_instances?id=eq.${encodeURIComponent(row.id)}`, {
+        method: "PATCH",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({ status: "retired" }),
+      }).catch((error) => {
+        console.warn("Retire agent-test junk failed", row.id, error);
+      }),
+    ),
+  );
+  return true;
+}
+
+function healCompletedStillOpenLocal(store) {
+  let changed = false;
+  const instances = store.instances.map((row) => {
+    if (!(row.completedAt || row.completed_at)) return row;
+    const status = row.status;
+    if (status !== "open" && status !== "assigned" && status !== "noticed") {
+      return row;
+    }
+    changed = true;
+    return { ...row, status: "done" };
+  });
+  return { store: changed ? { ...store, instances } : store, changed };
+}
+
+function retireAgentTestJunkLocal(store) {
+  let changed = false;
+  const instances = store.instances.map((row) => {
+    const status = row.status;
+    if (
+      !isAgentTestJunkTitle(row.title) ||
+      (status !== "open" && status !== "assigned" && status !== "noticed")
+    ) {
+      return row;
+    }
+    changed = true;
+    return { ...row, status: "retired" };
+  });
+  return { store: changed ? { ...store, instances } : store, changed };
+}
+
+/**
  * Fetch rich board without mutating globals — caller applies only if loadEpoch
  * still matches (drops in-flight poll results that would overwrite a newer save).
  */
@@ -1618,9 +1730,11 @@ async function fetchRichBoard(status) {
   );
 
   let rows = instanceRows;
+  const healedDone = await healCompletedStillOpenRich(instanceRows);
+  const retiredJunk = await retireAgentTestJunkRich(instanceRows);
   const promoted = await promoteDueWaitingRich(instanceRows);
   const released = await releaseExpiredClaimsRich(instanceRows);
-  if (promoted || released) {
+  if (healedDone || retiredJunk || promoted || released) {
     rows = await supabaseRequest(
       "task_instances?select=*&order=created_at.desc",
     );
@@ -1674,9 +1788,11 @@ function finalizeRichViews(
   }
   return views.filter(
     (c) =>
-      c.instanceStatus === "noticed" ||
-      c.instanceStatus === "open" ||
-      c.instanceStatus === "assigned",
+      !isAgentTestJunkTitle(c.title) &&
+      !c.completedAt &&
+      (c.instanceStatus === "noticed" ||
+        c.instanceStatus === "open" ||
+        c.instanceStatus === "assigned"),
   );
 }
 
@@ -1690,19 +1806,24 @@ async function findOrCreatePerson(name, role = "child") {
   if (backend === "supabase-rich") {
     const id = newId("person");
     const color = pickDefaultPersonColor(people);
-    const rows = await supabaseRequest("people", {
-      method: "POST",
-      headers: { Prefer: "return=representation" },
-      body: JSON.stringify({
-        id,
-        display_name: trimmed,
-        role: role || "child",
-        color,
-        active: true,
-        created_at: new Date().toISOString(),
-      }),
-    });
-    const person = toPersonView(rows[0]);
+    // Omit color when people.color not yet migrated (PR #20 SQL paste).
+    const rows = await supabaseWriteOmittingUnknownColumns(
+      "people",
+      {
+        method: "POST",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify({
+          id,
+          display_name: trimmed,
+          role: role || "child",
+          color,
+          active: true,
+          created_at: new Date().toISOString(),
+        }),
+      },
+      ["color"],
+    );
+    const person = toPersonView(rows[0] ?? { id, display_name: trimmed, role, color });
     people = [...people, person].sort((a, b) =>
       a.displayName.localeCompare(b.displayName),
     );
@@ -1998,11 +2119,20 @@ async function updatePersonColor(personId, colorRaw) {
   const color = normalizePersonColor(colorRaw);
   if (!color) throw new Error("Colour must be a hex value like #3d8b6e.");
   if (backend === "supabase-rich") {
-    await supabaseRequest(`people?id=eq.${encodeURIComponent(personId)}`, {
-      method: "PATCH",
-      headers: { Prefer: "return=minimal" },
-      body: JSON.stringify({ color }),
-    });
+    try {
+      await supabaseRequest(`people?id=eq.${encodeURIComponent(personId)}`, {
+        method: "PATCH",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({ color }),
+      });
+    } catch (error) {
+      if (isMissingColumnError(error, "color")) {
+        throw new Error(
+          "People colour needs the people.color column — run supabase/people-color-column.sql.",
+        );
+      }
+      throw error;
+    }
     people = people
       .map((p) => (p.id === personId ? { ...p, color } : p))
       .sort((a, b) => a.displayName.localeCompare(b.displayName));
@@ -2130,6 +2260,8 @@ async function completeRich(chore, options = {}) {
     ? people.find((p) => p.id === personId) || null
     : null;
   const completionId = newId("comp");
+  const awardNow = autoApproveOnComplete();
+  const award = awardNow ? awardPointsForChore(chore) : null;
   await supabaseRequest(
     `task_instances?id=eq.${encodeURIComponent(chore.id)}`,
     {
@@ -2161,8 +2293,12 @@ async function completeRich(chore, options = {}) {
       felt_difficulty: feltDifficulty ?? null,
       proof_photo_path: proofPath,
       proof_expires_at: proofPath ? proofExpiresAt(now) : null,
-      assessment_status: "pending",
-      points_awarded: null,
+      // Admin UI mode awards on Mark done so the weekly scoreboard updates
+      // immediately. Separate Approve remains for any legacy pending rows.
+      assessment_status: awardNow ? "approved" : "pending",
+      points_awarded: award,
+      assessed_by_person_id: awardNow ? personId : null,
+      assessed_at: awardNow ? now : null,
       created_at: now,
     }),
   });
@@ -2527,6 +2663,11 @@ function listLocal(status) {
   let store = applyLocalWeeklyPointsReset(
     releaseLocalClaims(promoteLocalWaiting(loadLocalV2())),
   );
+  const healPass = healCompletedStillOpenLocal(store);
+  store = healPass.store;
+  const junkPass = retireAgentTestJunkLocal(store);
+  store = junkPass.store;
+  if (healPass.changed || junkPass.changed) saveLocalV2(store);
   people = store.people.map((p) => toPersonView(p)).filter(Boolean);
   templatesById = new Map(
     store.templates.map((t) => [
@@ -2574,9 +2715,11 @@ function listLocal(status) {
   }
   return views.filter(
     (c) =>
-      c.instanceStatus === "noticed" ||
-      c.instanceStatus === "open" ||
-      c.instanceStatus === "assigned",
+      !isAgentTestJunkTitle(c.title) &&
+      !c.completedAt &&
+      (c.instanceStatus === "noticed" ||
+        c.instanceStatus === "open" ||
+        c.instanceStatus === "assigned"),
   );
 }
 
@@ -2890,10 +3033,12 @@ function render() {
 
   const openCount = chores.filter(
     (chore) =>
-      chore.instanceStatus === "open" ||
-      chore.instanceStatus === "assigned" ||
-      chore.instanceStatus === "noticed" ||
-      (chore.status === "open" && !chore.instanceStatus),
+      !isAgentTestJunkTitle(chore.title) &&
+      !chore.completedAt &&
+      (chore.instanceStatus === "open" ||
+        chore.instanceStatus === "assigned" ||
+        chore.instanceStatus === "noticed" ||
+        (chore.status === "open" && !chore.instanceStatus)),
   ).length;
   if (filter === "open") {
     summaryEl.textContent =
@@ -2901,7 +3046,8 @@ function render() {
         ? "All clear for now."
         : `${openCount} open ${openCount === 1 ? "task" : "tasks"} for the household.`;
   } else if (filter === "done") {
-    summaryEl.textContent = "Recently finished work — parents assess for points.";
+    summaryEl.textContent =
+      "Recently finished work. Admin mode already awards points on Mark done; Approve remains for any leftover pending rows.";
   } else {
     summaryEl.textContent = "Everything on the household board.";
   }
@@ -3850,6 +3996,16 @@ async function finishComplete(chore, options = {}) {
       if (proofFile) {
         proofPath = await fileToDataUrl(proofFile);
       }
+      const awardNow = autoApproveOnComplete();
+      const template = store.templates.find((t) => t.id === chore.templateId);
+      const award = awardNow
+        ? Math.max(
+            0,
+            Math.floor(
+              Number(template?.points ?? chore.points ?? DEFAULT_TASK_POINTS),
+            ),
+          )
+        : undefined;
       store.completions.push({
         id: newId("comp"),
         instanceId: chore.id,
@@ -3860,10 +4016,16 @@ async function finishComplete(chore, options = {}) {
         feltDifficulty: feltDifficulty ?? undefined,
         proofPhotoPath: proofPath || undefined,
         proofExpiresAt: proofPath ? proofExpiresAt(now) : undefined,
-        assessmentStatus: "pending",
+        assessmentStatus: awardNow ? "approved" : "pending",
+        ...(awardNow
+          ? {
+              pointsAwarded: award,
+              assessedByPersonId: personId || undefined,
+              assessedAt: now,
+            }
+          : {}),
         createdAt: now,
       });
-      const template = store.templates.find((t) => t.id === chore.templateId);
       if (template && template.kind !== "once") {
         const dueAt = nextDueAt(
           now,
@@ -3885,10 +4047,16 @@ async function finishComplete(chore, options = {}) {
       }
       saveLocalV2(store);
     }
+    const awarded = autoApproveOnComplete();
+    const pts = awarded ? awardPointsForChore(chore) : 0;
     setStatus(
-      proofFile
-        ? `Marked done (proof kept ~${PROOF_TTL_DAYS} days). Pending assessment.`
-        : "Marked done. Pending assessment.",
+      awarded
+        ? proofFile
+          ? `Marked done (+${pts} pts, proof ~${PROOF_TTL_DAYS} days).`
+          : `Marked done — +${pts} pts on this week’s scoreboard.`
+        : proofFile
+          ? `Marked done (proof kept ~${PROOF_TTL_DAYS} days). Pending assessment.`
+          : "Marked done. Pending assessment.",
     );
     await loadChores({ quiet: true });
   } catch (error) {

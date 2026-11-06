@@ -27,17 +27,22 @@ This creates / updates:
 | `public.completion_events` | Completions + proof photo TTL + **assessment** / **points_awarded** |
 | `public.household_meta` | Household timezone + **`last_points_reset_at`** (weekly scoreboard cursor) |
 | `public.points_history` | Closed-week scoreboard snapshots (person totals + period label) |
+| `public.points_adjustments` | Signed admin corrections (add/remove) counted on this week’s scoreboard |
 | Storage bucket `chore-photos` | Reference (durable) + proof (TTL) images |
 
 **Re-run this SQL on School Compass** whenever schema columns change (safe to
-re-run). Latest additive objects: `household_meta` + `points_history` (Sunday-night
-weekly points reset). Also present: `task_instances.complete_by`;
+re-run). Latest additive objects: `points_adjustments` (Manage page corrections);
+also `household_meta` + `points_history` (Sunday-night weekly points reset).
+Also present: `task_instances.complete_by`;
 `recurrence_interval`, `recurrence_unit`, `points` on templates;
 `assessment_status`, `points_awarded`, `assessed_by_person_id`,
-`assessed_at` on completion events.
+`assessed_at` on completion events; `people.color`.
+
+Paste-only slice for adjustments: [`supabase/points-adjustments.sql`](supabase/points-adjustments.sql).
 
 **Scoreboard model:** current points = sum of approved `points_awarded` with
-award time ≥ `last_points_reset_at`. Completions are never deleted. On Sunday
+award time ≥ `last_points_reset_at`, plus sum of signed `points_adjustments.points`
+with `created_at` ≥ that cursor. Completions are never deleted. On Sunday
 night (Monday 00:00 household TZ, default `Europe/London`), the Pages client
 snapshots totals into `points_history` then advances the cursor (idempotent
 across devices). pg_cron is optional — not required for v1.
@@ -71,8 +76,9 @@ reconciles with Supabase in the background.
 - **List layout** — open list shows **titles only** (scrollable); tap a title for the full task card (details, Edit, Mark done). **New task** is a single collapsed button until opened.
 - **Assign with a complete-by time** — naming an assignee (New task or Edit) requires a complete-by date and time. Until then the task stays assigned to that person. After that time, if it is still not done, the app clears the assignee on load and when the page renders, and anyone can mark it done with the name picker.
 - **Edit any task** — **Edit** on a task card updates title, description, steps, points, recurrence, assignee, complete-by, kind, due date, reference photo.
-- **People** — **People** tab: add name + role (`parent` / `child` / `other`), list and change roles.
-- **Points** — point value is on the add form (not buried) and editable per task; **Scores** tab shows **this week’s** approved totals plus a simple **past weeks** history. Totals reset Sunday night after snapshotting into history.
+- **People** — **People** tab: add name + role (`parent` / `child` / `other`), list and change roles; optional colour for “I am” page tint.
+- **Manage** — admin corrections: add or remove points per named person (reason optional). Rows land in `points_adjustments` and update **Scores** for the current week.
+- **Points** — point value is on the add form (not buried) and editable per task; **Scores** tab shows **this week’s** approved totals (plus Manage adjustments) and a simple **past weeks** history. Totals reset Sunday night after snapshotting into history.
 - **Fast load** — open tasks / scoreboard paint from a localStorage cache first, then revalidate against Supabase (stale-while-revalidate).
 - **Mark done** — tap the check on an open task → popup asks **who did it**, optional **in-page camera** evidence (fallback: photo library / `capture`), and optional how-long / how-hard. No separate “I’ll do it” claim step. Assign-by-name on add/edit still works; “I am …” pre-fills the name picker. In **admin UI mode (v1)** Mark done **auto-approves** and adds template points to **this week’s** scoreboard immediately.
 - **Template steps** + **reference photo** — “what good looks like” on add/edit (camera helper available).

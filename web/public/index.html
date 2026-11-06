@@ -24,7 +24,7 @@
       href="https://fonts.googleapis.com/css2?family=Figtree:wght@500;600;700&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="./styles.css?v=20261105b" />
+    <link rel="stylesheet" href="./styles.css?v=20261105c" />
   </head>
   <body>
     <div class="atmosphere" aria-hidden="true"></div>
@@ -40,7 +40,7 @@
             <option value="">Someone…</option>
           </select>
           <p id="admin-hint" class="admin-hint" role="status">
-            Admin mode — edit, points, people, assess. Logins later.
+            Admin mode — edit, points, people, manage, assess. Logins later.
           </p>
         </div>
         <div class="filters" role="tablist" aria-label="Chore filters">
@@ -56,6 +56,9 @@
           <button class="filter" data-filter="people" role="tab" aria-selected="false">
             People
           </button>
+          <button class="filter" data-filter="manage" role="tab" aria-selected="false">
+            Manage
+          </button>
           <button class="filter" data-filter="scores" role="tab" aria-selected="false">
             Scores
           </button>
@@ -67,6 +70,7 @@
           <h1 id="list-heading" class="visually-hidden">Household chores</h1>
           <ul id="chore-list" class="chore-list"></ul>
           <div id="people-panel" class="people-panel hidden" aria-live="polite"></div>
+          <div id="manage-panel" class="manage-panel hidden" aria-live="polite"></div>
           <div id="scoreboard" class="scoreboard hidden" aria-live="polite"></div>
           <p id="empty-state" class="empty-state hidden">
             Nothing here yet. Tap New task to add one.
@@ -408,7 +412,7 @@
       </div>
     </dialog>
 
-    <script src="./config.js?v=20261105b"></script>
-    <script src="./app.js?v=20261105b" type="module"></script>
+    <script src="./config.js?v=20261105c"></script>
+    <script src="./app.js?v=20261105c" type="module"></script>
   </body>
 </html>

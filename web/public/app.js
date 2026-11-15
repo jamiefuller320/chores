@@ -1,4 +1,5 @@
 const listEl = document.querySelector("#chore-list");
+const homeProgressEl = document.querySelector("#home-progress");
 const scoreboardEl = document.querySelector("#scoreboard");
 const peoplePanelEl = document.querySelector("#people-panel");
 const managePanelEl = document.querySelector("#manage-panel");
@@ -173,6 +174,69 @@ begin
       check (color ~ '^#[0-9A-Fa-f]{6}$');
   end if;
 end $$;`;
+/** Paste into School Compass Supabase → SQL → New query → Run. */
+const POCKET_MONEY_SQL = `-- Per-child points target + pocket money (£) settings and running owed tally.
+-- Safe to re-run. Also in repo supabase/pocket-money.sql / schema.sql.
+
+alter table public.people
+  add column if not exists points_target integer;
+
+alter table public.people
+  add column if not exists pocket_money_amount numeric(10, 2);
+
+alter table public.people
+  add column if not exists pocket_money_owed numeric(10, 2);
+
+alter table public.people
+  add column if not exists pocket_money_last_credited_week timestamptz;
+
+update public.people
+set pocket_money_amount = 0
+where pocket_money_amount is null;
+
+update public.people
+set pocket_money_owed = 0
+where pocket_money_owed is null;
+
+alter table public.people
+  alter column pocket_money_amount set default 0;
+
+alter table public.people
+  alter column pocket_money_owed set default 0;
+
+alter table public.people
+  alter column pocket_money_amount set not null;
+
+alter table public.people
+  alter column pocket_money_owed set not null;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'people_points_target_check'
+  ) then
+    alter table public.people
+      add constraint people_points_target_check
+      check (points_target is null or points_target >= 0);
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'people_pocket_money_amount_check'
+  ) then
+    alter table public.people
+      add constraint people_pocket_money_amount_check
+      check (pocket_money_amount >= 0);
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'people_pocket_money_owed_check'
+  ) then
+    alter table public.people
+      add constraint people_pocket_money_owed_check
+      check (pocket_money_owed >= 0);
+  end if;
+end $$;`;
 /**
  * v1 product default: treat the Pages UI as full parent/admin mode.
  * Real logins + password-reset authority come later (see chore-model-plan).
@@ -193,6 +257,8 @@ let chores = [];
 let people = [];
 /** True when PostgREST reports people.color missing (schema not migrated). */
 let peopleColorColumnMissing = false;
+/** True when pocket-money columns on people are missing (schema not migrated). */
+let peoplePocketMoneyColumnsMissing = false;
 /** Person id with the inline colour editor open, or null. */
 let openColorEditorPersonId = null;
 /** @type {Map<string, Record<string, unknown>>} */
@@ -578,6 +644,25 @@ function defaultColorForId(personId) {
   return DEFAULT_PERSON_COLORS[hash % DEFAULT_PERSON_COLORS.length].toLowerCase();
 }
 
+function parseNonNegInt(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n) || n < 0) return null;
+  return n;
+}
+
+function parseMoneyAmount(value) {
+  if (value === null || value === undefined || value === "") return 0;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.round(n * 100) / 100;
+}
+
+function formatPounds(amount) {
+  const n = parseMoneyAmount(amount);
+  return `£${n.toFixed(2)}`;
+}
+
 function toPersonView(row) {
   if (!row || typeof row !== "object") return null;
   const id = String(row.id);
@@ -586,12 +671,61 @@ function toPersonView(row) {
     normalizePersonColor(overrides[id]) ||
     normalizePersonColor(row.color) ||
     defaultColorForId(id);
+  const pointsTarget = parseNonNegInt(
+    row.pointsTarget ?? row.points_target,
+  );
   return {
     id,
     displayName: row.displayName ?? row.display_name,
     role: row.role ?? "child",
     color,
+    pointsTarget,
+    pocketMoneyAmount: parseMoneyAmount(
+      row.pocketMoneyAmount ?? row.pocket_money_amount,
+    ),
+    pocketMoneyOwed: parseMoneyAmount(
+      row.pocketMoneyOwed ?? row.pocket_money_owed,
+    ),
+    pocketMoneyLastCreditedWeek:
+      row.pocketMoneyLastCreditedWeek ??
+      row.pocket_money_last_credited_week ??
+      null,
   };
+}
+
+function childPeople(list = people) {
+  return (list ?? []).filter((p) => p.role === "child");
+}
+
+function weekPointsFor(personId) {
+  return scoreRows.find((r) => r.personId === personId)?.points ?? 0;
+}
+
+/**
+ * Plan pocket-money credits for a closed week (idempotent via last credited week).
+ * @returns {Array<{personId: string, nextOwed: number, amount: number, weekEnding: string}>}
+ */
+function planPocketMoneyCredits(peopleList, closingPointsByPerson, weekEndingIso) {
+  const credits = [];
+  for (const person of peopleList ?? []) {
+    if (person.role !== "child") continue;
+    const target = Number(person.pointsTarget) || 0;
+    if (target <= 0) continue;
+    const amount = parseMoneyAmount(person.pocketMoneyAmount);
+    if (amount <= 0) continue;
+    if (person.pocketMoneyLastCreditedWeek === weekEndingIso) continue;
+    const pts = closingPointsByPerson.get(person.id) ?? 0;
+    if (pts < target) continue;
+    credits.push({
+      personId: person.id,
+      amount,
+      nextOwed:
+        Math.round((parseMoneyAmount(person.pocketMoneyOwed) + amount) * 100) /
+        100,
+      weekEnding: weekEndingIso,
+    });
+  }
+  return credits;
 }
 
 function syncIdentityBackground() {
@@ -1500,7 +1634,15 @@ function boardFingerprint(snapshot = null) {
     filter,
     backend,
     resetAt: resetAt ?? null,
-    people: (p ?? []).map((row) => [row.id, row.displayName, row.role]),
+    people: (p ?? []).map((row) => [
+      row.id,
+      row.displayName,
+      row.role,
+      row.pointsTarget ?? null,
+      row.pocketMoneyAmount ?? 0,
+      row.pocketMoneyOwed ?? 0,
+      row.pocketMoneyLastCreditedWeek ?? null,
+    ]),
     scores: (scores ?? []).map((row) => [row.personId, row.points]),
     history: (history ?? []).map((row) => [
       row.id,
@@ -1712,10 +1854,67 @@ async function writeHouseholdMetaReset(nextLastResetAt, timezone) {
   });
 }
 
+async function applyPocketMoneyCreditsRich(
+  peopleList,
+  closingPointsByPerson,
+  weekEndingIso,
+) {
+  const credits = planPocketMoneyCredits(
+    peopleList,
+    closingPointsByPerson,
+    weekEndingIso,
+  );
+  if (credits.length === 0) return peopleList;
+  const updated = new Map();
+  for (const credit of credits) {
+    try {
+      await supabaseRequest(
+        `people?id=eq.${encodeURIComponent(credit.personId)}`,
+        {
+          method: "PATCH",
+          headers: { Prefer: "return=minimal" },
+          body: JSON.stringify({
+            pocket_money_owed: credit.nextOwed,
+            pocket_money_last_credited_week: weekEndingIso,
+          }),
+        },
+      );
+      updated.set(credit.personId, credit);
+    } catch (error) {
+      if (
+        isMissingColumnError(error, "pocket_money_owed") ||
+        isMissingColumnError(error, "pocket_money_amount") ||
+        isMissingColumnError(error, "points_target") ||
+        isMissingColumnError(error, "pocket_money_last_credited_week")
+      ) {
+        peoplePocketMoneyColumnsMissing = true;
+        console.warn(
+          "Pocket money columns missing — run supabase/pocket-money.sql",
+          error,
+        );
+        return peopleList;
+      }
+      console.warn("Pocket money credit failed", credit.personId, error);
+    }
+  }
+  if (updated.size === 0) return peopleList;
+  return peopleList.map((person) => {
+    const credit = updated.get(person.id);
+    if (!credit) return person;
+    return {
+      ...person,
+      pocketMoneyOwed: credit.nextOwed,
+      pocketMoneyLastCreditedWeek: weekEndingIso,
+    };
+  });
+}
+
 /**
  * Idempotent Sunday-night rollover (client-side for Pages).
  * Snapshots current period totals into points_history, then advances
  * last_points_reset_at so the live board = awards since that cursor.
+ * When a child meets their points target for the closed week, credits
+ * their pocket_money_amount onto pocket_money_owed.
  */
 async function maybeWeeklyPointsResetRich(
   peopleList,
@@ -1723,7 +1922,9 @@ async function maybeWeeklyPointsResetRich(
   metaRow,
   adjustmentList = [],
 ) {
-  if (!metaRow) return { lastResetAt: null, history: pointsHistory };
+  if (!metaRow) {
+    return { lastResetAt: null, history: pointsHistory, people: peopleList };
+  }
   householdTimezone =
     (metaRow.timezone && String(metaRow.timezone).trim()) ||
     DEFAULT_HOUSEHOLD_TIMEZONE;
@@ -1761,11 +1962,16 @@ async function maybeWeeklyPointsResetRich(
       await writeHouseholdMetaReset(weekStartIso, householdTimezone);
     } catch (error) {
       console.warn("Weekly points seed skipped", error);
-      return { lastResetAt: null, history: await fetchPointsHistoryRich() };
+      return {
+        lastResetAt: null,
+        history: await fetchPointsHistoryRich(),
+        people: peopleList,
+      };
     }
     return {
       lastResetAt: weekStartIso,
       history: await fetchPointsHistoryRich(),
+      people: peopleList,
     };
   }
 
@@ -1775,6 +1981,7 @@ async function maybeWeeklyPointsResetRich(
     return {
       lastResetAt: lastReset,
       history: await fetchPointsHistoryRich(),
+      people: peopleList,
     };
   }
 
@@ -1786,24 +1993,37 @@ async function maybeWeeklyPointsResetRich(
       adjustmentList,
     ).map((r) => [r.personId, r.points]),
   );
-  const historyRows = computeScoreboard(
+  const closingRows = computeScoreboard(
     peopleList,
     completionList,
     lastReset,
     adjustmentList,
-  )
+  );
+  const closingPoints = new Map(
+    closingRows.map((row) => [
+      row.personId,
+      Math.max(0, row.points - (sinceWeek.get(row.personId) ?? 0)),
+    ]),
+  );
+  const historyRows = closingRows
     .map((row) => ({
       id: newId("ph"),
       weekEnding: weekStartIso,
       periodLabel,
       personId: row.personId,
       displayName: row.displayName,
-      points: Math.max(0, row.points - (sinceWeek.get(row.personId) ?? 0)),
+      points: closingPoints.get(row.personId) ?? 0,
       createdAt: new Date().toISOString(),
     }))
     .filter((row) => row.points > 0);
 
+  let nextPeople = peopleList;
   try {
+    nextPeople = await applyPocketMoneyCreditsRich(
+      peopleList,
+      closingPoints,
+      weekStartIso,
+    );
     await upsertPointsHistoryRich(historyRows);
     await writeHouseholdMetaReset(weekStartIso, householdTimezone);
   } catch (error) {
@@ -1811,11 +2031,13 @@ async function maybeWeeklyPointsResetRich(
     return {
       lastResetAt: lastReset,
       history: await fetchPointsHistoryRich(),
+      people: nextPeople,
     };
   }
   return {
     lastResetAt: weekStartIso,
     history: await fetchPointsHistoryRich(),
+    people: nextPeople,
   };
 }
 
@@ -1923,7 +2145,7 @@ async function fetchRichBoard(status) {
     fetchHouseholdMetaRich(),
     fetchPointsAdjustmentsRich(),
   ]);
-  const nextPeople = (peopleRows ?? [])
+  let nextPeople = (peopleRows ?? [])
     .map((row) => toPersonView(row))
     .filter(Boolean);
   const nextTemplates = new Map(
@@ -1937,6 +2159,7 @@ async function fetchRichBoard(status) {
     metaRow,
     nextAdjustments,
   );
+  nextPeople = reset.people ?? nextPeople;
   const nextScoreRows = computeScoreboard(
     nextPeople,
     nextCompletions,
@@ -2341,6 +2564,144 @@ async function updatePersonRole(personId, role) {
     return;
   }
   throw new Error("Managing people needs rich Supabase or local mode.");
+}
+
+/**
+ * Save a child’s weekly points target and pocket-money reward amount (£).
+ */
+async function updateChildPocketSettings(personId, pointsTargetRaw, amountRaw) {
+  if (!ADMIN_UI_MODE && !isAdmin()) {
+    throw new Error("Admin mode required to set pocket money.");
+  }
+  const person = people.find((p) => p.id === personId);
+  if (!person) throw new Error("Choose a child first.");
+  if (person.role !== "child") {
+    throw new Error("Points targets and pocket money are for children.");
+  }
+  const pointsTarget = parseNonNegInt(pointsTargetRaw);
+  if (pointsTargetRaw !== "" && pointsTargetRaw != null && pointsTarget === null) {
+    throw new Error("Points target must be zero or a positive whole number.");
+  }
+  const pocketMoneyAmount = parseMoneyAmount(amountRaw);
+  if (
+    amountRaw !== "" &&
+    amountRaw != null &&
+    (!Number.isFinite(Number(amountRaw)) || Number(amountRaw) < 0)
+  ) {
+    throw new Error("Pocket money must be £0 or more.");
+  }
+  if (pocketMoneyAmount > 9999.99) {
+    throw new Error("Pocket money amount must be £9999.99 or less.");
+  }
+
+  const patch = {
+    points_target: pointsTarget,
+    pocket_money_amount: pocketMoneyAmount,
+  };
+
+  if (backend === "supabase-rich") {
+    try {
+      await supabaseRequest(`people?id=eq.${encodeURIComponent(personId)}`, {
+        method: "PATCH",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify(patch),
+      });
+      peoplePocketMoneyColumnsMissing = false;
+    } catch (error) {
+      if (
+        isMissingColumnError(error, "points_target") ||
+        isMissingColumnError(error, "pocket_money_amount") ||
+        isMissingColumnError(error, "pocket_money_owed")
+      ) {
+        peoplePocketMoneyColumnsMissing = true;
+        throw new Error(
+          "Pocket money needs Supabase columns — run supabase/pocket-money.sql.",
+        );
+      }
+      throw error;
+    }
+    people = people
+      .map((p) =>
+        p.id === personId
+          ? {
+              ...p,
+              pointsTarget,
+              pocketMoneyAmount,
+            }
+          : p,
+      )
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
+    return;
+  }
+
+  if (backend === "local") {
+    const store = loadLocalV2();
+    const index = store.people.findIndex((p) => p.id === personId);
+    if (index < 0) throw new Error("Person not found");
+    store.people[index] = {
+      ...store.people[index],
+      pointsTarget,
+      pocketMoneyAmount,
+      points_target: pointsTarget,
+      pocket_money_amount: pocketMoneyAmount,
+    };
+    saveLocalV2(store);
+    people = store.people.map((p) => toPersonView(p)).filter(Boolean);
+    return;
+  }
+
+  throw new Error("Saving pocket money needs rich Supabase or local mode.");
+}
+
+/** Reset a child’s running pocket-money tally to £0 after paying them. */
+async function markPocketMoneyPaid(personId) {
+  if (!ADMIN_UI_MODE && !isAdmin()) {
+    throw new Error("Admin mode required to mark pocket money paid.");
+  }
+  const person = people.find((p) => p.id === personId);
+  if (!person) throw new Error("Choose a child first.");
+  if (person.role !== "child") {
+    throw new Error("Pocket money paid is for children.");
+  }
+
+  if (backend === "supabase-rich") {
+    try {
+      await supabaseRequest(`people?id=eq.${encodeURIComponent(personId)}`, {
+        method: "PATCH",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({ pocket_money_owed: 0 }),
+      });
+      peoplePocketMoneyColumnsMissing = false;
+    } catch (error) {
+      if (isMissingColumnError(error, "pocket_money_owed")) {
+        peoplePocketMoneyColumnsMissing = true;
+        throw new Error(
+          "Pocket money needs Supabase columns — run supabase/pocket-money.sql.",
+        );
+      }
+      throw error;
+    }
+    people = people
+      .map((p) => (p.id === personId ? { ...p, pocketMoneyOwed: 0 } : p))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
+    return;
+  }
+
+  if (backend === "local") {
+    const store = loadLocalV2();
+    const index = store.people.findIndex((p) => p.id === personId);
+    if (index < 0) throw new Error("Person not found");
+    store.people[index] = {
+      ...store.people[index],
+      pocketMoneyOwed: 0,
+      pocket_money_owed: 0,
+    };
+    saveLocalV2(store);
+    people = store.people.map((p) => toPersonView(p)).filter(Boolean);
+    return;
+  }
+
+  throw new Error("Marking paid needs rich Supabase or local mode.");
 }
 
 /**
@@ -2975,21 +3336,58 @@ function applyLocalWeeklyPointsReset(store) {
     ).map((r) => [r.personId, r.points]),
   );
   const periodLabel = periodLabelForWeekEnding(weekStartIso, householdTimezone);
+  const closingRows = computeScoreboard(
+    peopleList,
+    store.completions,
+    lastReset,
+    adjustmentList,
+  );
+  const closingPoints = new Map(
+    closingRows.map((row) => [
+      row.personId,
+      Math.max(0, row.points - (sinceWeek.get(row.personId) ?? 0)),
+    ]),
+  );
   pushHistory(
-    computeScoreboard(peopleList, store.completions, lastReset, adjustmentList)
+    closingRows
       .map((row) => ({
         id: newId("ph"),
         weekEnding: weekStartIso,
         periodLabel,
         personId: row.personId,
         displayName: row.displayName,
-        points: Math.max(0, row.points - (sinceWeek.get(row.personId) ?? 0)),
+        points: closingPoints.get(row.personId) ?? 0,
         createdAt: nowIso,
       }))
       .filter((row) => row.points > 0),
   );
+
+  const credits = planPocketMoneyCredits(
+    peopleList,
+    closingPoints,
+    weekStartIso,
+  );
+  const creditById = new Map(credits.map((c) => [c.personId, c]));
+  const nextPeople = (store.people ?? []).map((raw) => {
+    const view = toPersonView(raw);
+    const credit = view ? creditById.get(view.id) : null;
+    if (!credit) return raw;
+    return {
+      ...raw,
+      pointsTarget: view.pointsTarget,
+      pocketMoneyAmount: view.pocketMoneyAmount,
+      pocketMoneyOwed: credit.nextOwed,
+      pocketMoneyLastCreditedWeek: weekStartIso,
+      points_target: view.pointsTarget,
+      pocket_money_amount: view.pocketMoneyAmount,
+      pocket_money_owed: credit.nextOwed,
+      pocket_money_last_credited_week: weekStartIso,
+    };
+  });
+
   const next = {
     ...store,
+    people: nextPeople,
     pointsHistory: history,
     pointsAdjustments: adjustmentList,
     householdMeta: {
@@ -3180,9 +3578,200 @@ function adjustmentsThisWeek(list = pointsAdjustments, sinceIso = lastPointsRese
   });
 }
 
+function buildPocketMoneySqlBanner() {
+  const banner = document.createElement("div");
+  banner.className = "people-sql-banner";
+  const title = document.createElement("p");
+  title.className = "people-sql-title";
+  title.textContent =
+    "Pocket money columns missing on Supabase. Paste SQL → Run, then reload.";
+  const actions = document.createElement("div");
+  actions.className = "people-sql-actions";
+  const copyBtn = document.createElement("button");
+  copyBtn.type = "button";
+  copyBtn.className = "ghost";
+  copyBtn.textContent = "Copy SQL";
+  copyBtn.addEventListener("click", () => {
+    void (async () => {
+      try {
+        await navigator.clipboard.writeText(POCKET_MONEY_SQL);
+        setStatus("SQL copied — paste in Supabase → SQL → Run.", {
+          tone: "ok",
+        });
+      } catch {
+        setStatus("Could not copy — select the SQL below and copy manually.", {
+          tone: "error",
+        });
+      }
+    })();
+  });
+  const details = document.createElement("details");
+  details.className = "people-sql-details";
+  const summary = document.createElement("summary");
+  summary.textContent = "Show pasteable SQL";
+  const pre = document.createElement("pre");
+  pre.className = "people-sql-pre";
+  pre.textContent = POCKET_MONEY_SQL;
+  details.append(summary, pre);
+  actions.append(copyBtn);
+  banner.append(title, actions, details);
+  return banner;
+}
+
+function renderChildPocketSettings() {
+  const children = childPeople();
+  const block = document.createElement("div");
+  block.className = "manage-block";
+  const title = document.createElement("p");
+  title.className = "field-label";
+  title.textContent = "Points targets & pocket money";
+  const intro = document.createElement("p");
+  intro.className = "field-hint";
+  intro.textContent =
+    "Set each child’s weekly points target and the £ amount credited when they hit it. Owed tally persists until you mark Paid.";
+  block.append(title, intro);
+
+  if (peoplePocketMoneyColumnsMissing && backend === "supabase-rich") {
+    block.append(buildPocketMoneySqlBanner());
+  }
+
+  if (children.length === 0) {
+    const none = document.createElement("p");
+    none.className = "field-hint";
+    none.textContent = "Add a child under People to set targets.";
+    block.append(none);
+    return block;
+  }
+
+  const list = document.createElement("ul");
+  list.className = "manage-child-list";
+  for (const child of children) {
+    const li = document.createElement("li");
+    li.className = "manage-child-row";
+
+    const head = document.createElement("div");
+    head.className = "manage-child-head";
+    const name = document.createElement("p");
+    name.className = "manage-adjust-name";
+    name.textContent = child.displayName;
+    const owed = document.createElement("p");
+    owed.className = "manage-child-owed";
+    owed.textContent = `Owed ${formatPounds(child.pocketMoneyOwed)}`;
+    head.append(name, owed);
+
+    const fields = document.createElement("div");
+    fields.className = "manage-child-fields";
+
+    const targetLabel = document.createElement("label");
+    targetLabel.className = "manage-child-field";
+    const targetCaption = document.createElement("span");
+    targetCaption.textContent = "Points target";
+    const targetInput = document.createElement("input");
+    targetInput.type = "number";
+    targetInput.min = "0";
+    targetInput.max = "9999";
+    targetInput.step = "1";
+    targetInput.inputMode = "numeric";
+    targetInput.setAttribute(
+      "aria-label",
+      `${child.displayName} points target`,
+    );
+    targetInput.value =
+      child.pointsTarget == null ? "" : String(child.pointsTarget);
+    targetInput.placeholder = "e.g. 20";
+    targetLabel.append(targetCaption, targetInput);
+
+    const moneyLabel = document.createElement("label");
+    moneyLabel.className = "manage-child-field";
+    const moneyCaption = document.createElement("span");
+    moneyCaption.textContent = "Pocket money £";
+    const moneyInput = document.createElement("input");
+    moneyInput.type = "number";
+    moneyInput.min = "0";
+    moneyInput.max = "9999.99";
+    moneyInput.step = "0.01";
+    moneyInput.inputMode = "decimal";
+    moneyInput.setAttribute(
+      "aria-label",
+      `${child.displayName} pocket money amount`,
+    );
+    moneyInput.value = String(child.pocketMoneyAmount ?? 0);
+    moneyLabel.append(moneyCaption, moneyInput);
+
+    fields.append(targetLabel, moneyLabel);
+
+    const actions = document.createElement("div");
+    actions.className = "manage-actions";
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "primary";
+    saveBtn.textContent = "Save";
+    const paidBtn = document.createElement("button");
+    paidBtn.type = "button";
+    paidBtn.className = "ghost";
+    paidBtn.textContent = "Pocket Money Paid";
+    paidBtn.disabled = parseMoneyAmount(child.pocketMoneyOwed) <= 0;
+
+    saveBtn.addEventListener("click", () => {
+      void (async () => {
+        saveBtn.disabled = true;
+        paidBtn.disabled = true;
+        try {
+          await updateChildPocketSettings(
+            child.id,
+            targetInput.value,
+            moneyInput.value,
+          );
+          setStatus(`Saved ${child.displayName}’s target and pocket money.`, {
+            tone: "ok",
+          });
+          writeSwrCache();
+          lastBoardFingerprint = boardFingerprint();
+          renderManagePanel();
+        } catch (error) {
+          setStatus(error.message, { tone: "error" });
+          saveBtn.disabled = false;
+          paidBtn.disabled = parseMoneyAmount(child.pocketMoneyOwed) <= 0;
+        }
+      })();
+    });
+
+    paidBtn.addEventListener("click", () => {
+      void (async () => {
+        saveBtn.disabled = true;
+        paidBtn.disabled = true;
+        try {
+          await markPocketMoneyPaid(child.id);
+          setStatus(
+            `Marked ${child.displayName}’s pocket money as paid (tally £0).`,
+            { tone: "ok" },
+          );
+          writeSwrCache();
+          lastBoardFingerprint = boardFingerprint();
+          renderManagePanel();
+        } catch (error) {
+          setStatus(error.message, { tone: "error" });
+          saveBtn.disabled = false;
+          paidBtn.disabled = parseMoneyAmount(child.pocketMoneyOwed) <= 0;
+        }
+      })();
+    });
+
+    actions.append(saveBtn, paidBtn);
+    li.append(head, fields, actions);
+    list.append(li);
+  }
+  block.append(list);
+  return block;
+}
+
 function renderManagePanel() {
   listEl.innerHTML = "";
   listEl.classList.add("hidden");
+  if (homeProgressEl) {
+    homeProgressEl.classList.add("hidden");
+    homeProgressEl.innerHTML = "";
+  }
   peoplePanelEl.classList.add("hidden");
   peoplePanelEl.innerHTML = "";
   scoreboardEl.classList.add("hidden");
@@ -3194,14 +3783,16 @@ function renderManagePanel() {
 
   summaryEl.textContent =
     people.length === 0
-      ? "Add people first, then correct weekly points here."
-      : "Admin corrections — add or remove points for this week’s scoreboard.";
+      ? "Add people first, then set targets and correct weekly points here."
+      : "Set child targets & pocket money, or correct this week’s points.";
 
   if (people.length === 0) {
     emptyEl.textContent = "No people yet. Add someone under People.";
     emptyEl.classList.remove("hidden");
     return;
   }
+
+  managePanelEl.append(renderChildPocketSettings());
 
   const formBlock = document.createElement("div");
   formBlock.className = "manage-block";
@@ -3362,9 +3953,75 @@ function renderManagePanel() {
   managePanelEl.append(list);
 }
 
+function renderHomeProgress() {
+  if (!homeProgressEl) return;
+  homeProgressEl.innerHTML = "";
+  if (filter !== "open") {
+    homeProgressEl.classList.add("hidden");
+    return;
+  }
+  const tracked = childPeople().filter((p) => (Number(p.pointsTarget) || 0) > 0);
+  if (tracked.length === 0) {
+    homeProgressEl.classList.add("hidden");
+    return;
+  }
+  homeProgressEl.classList.remove("hidden");
+  const heading = document.createElement("p");
+  heading.className = "home-progress-label";
+  heading.textContent = "This week’s targets";
+  homeProgressEl.append(heading);
+
+  const list = document.createElement("ul");
+  list.className = "home-progress-list";
+  for (const child of tracked) {
+    const target = Number(child.pointsTarget) || 0;
+    const pts = weekPointsFor(child.id);
+    const ratio = target > 0 ? Math.min(1, Math.max(0, pts / target)) : 0;
+    const met = pts >= target;
+
+    const li = document.createElement("li");
+    li.className = `home-progress-row${met ? " is-met" : ""}`;
+
+    const top = document.createElement("div");
+    top.className = "home-progress-top";
+    const name = document.createElement("p");
+    name.className = "home-progress-name";
+    name.textContent = child.displayName;
+    const meta = document.createElement("p");
+    meta.className = "home-progress-meta";
+    meta.textContent = met
+      ? `${pts} / ${target} pts — target met`
+      : `${pts} / ${target} pts`;
+    top.append(name, meta);
+
+    const track = document.createElement("div");
+    track.className = "home-progress-track";
+    track.setAttribute("role", "progressbar");
+    track.setAttribute("aria-valuemin", "0");
+    track.setAttribute("aria-valuemax", String(target));
+    track.setAttribute("aria-valuenow", String(pts));
+    track.setAttribute(
+      "aria-label",
+      `${child.displayName} ${pts} of ${target} points`,
+    );
+    const fill = document.createElement("div");
+    fill.className = "home-progress-fill";
+    fill.style.width = `${Math.round(ratio * 100)}%`;
+    track.append(fill);
+
+    li.append(top, track);
+    list.append(li);
+  }
+  homeProgressEl.append(list);
+}
+
 function renderScoreboard() {
   listEl.innerHTML = "";
   listEl.classList.add("hidden");
+  if (homeProgressEl) {
+    homeProgressEl.classList.add("hidden");
+    homeProgressEl.innerHTML = "";
+  }
   peoplePanelEl.classList.add("hidden");
   peoplePanelEl.innerHTML = "";
   if (managePanelEl) {
@@ -3451,6 +4108,10 @@ function renderScoreboard() {
 function renderPeoplePanel() {
   listEl.innerHTML = "";
   listEl.classList.add("hidden");
+  if (homeProgressEl) {
+    homeProgressEl.classList.add("hidden");
+    homeProgressEl.innerHTML = "";
+  }
   scoreboardEl.classList.add("hidden");
   scoreboardEl.innerHTML = "";
   if (managePanelEl) {
@@ -3771,6 +4432,7 @@ function render() {
   emptyEl.classList.toggle("hidden", chores.length > 0);
   emptyEl.textContent = "Nothing here yet. Tap New task to add one.";
   fillMeSelect();
+  renderHomeProgress();
 
   const openCount = chores.filter(
     (chore) =>

@@ -20,6 +20,9 @@
 --   Manual corrections use signed points_adjustments (positive add / negative remove).
 --   On Sunday night (Monday 00:00 household TZ), Pages snapshots current totals into
 --   points_history then advances last_points_reset_at. Completions are never deleted.
+--   Pocket money: when a child’s closed-week points >= people.points_target (>0),
+--   Pages adds people.pocket_money_amount to people.pocket_money_owed (idempotent via
+--   pocket_money_last_credited_week). Manage “Pocket Money Paid” zeros owed.
 -- Optional server cron (not required for v1 — client idempotent reset on load):
 --   -- select cron.schedule('chores-weekly-points-reset', '5 0 * * 1', $$ … $$);
 --   -- Prefer Europe/London Monday 00:05; client still reconciles if cron is absent.
@@ -90,6 +93,14 @@ create table if not exists public.people (
   active boolean not null default true,
   -- Hex #RRGGBB; page background tint when this person is selected in “I am”.
   color text not null default '#3d8b6e',
+  -- Weekly points target (children). Null/0 = no target / no auto pocket-money credit.
+  points_target integer,
+  -- £ amount credited to pocket_money_owed when weekly points meet the target.
+  pocket_money_amount numeric(10, 2) not null default 0,
+  -- Running pocket-money tally owed to this child (Paid resets to 0).
+  pocket_money_owed numeric(10, 2) not null default 0,
+  -- week_ending (Mon 00:00 household TZ) last credited — makes weekly credit idempotent.
+  pocket_money_last_credited_week timestamptz,
   created_at timestamptz not null default now()
 );
 
@@ -129,6 +140,19 @@ update public.people set color = '#3d8b6e' where color is null;
 alter table public.people
   alter column color set not null;
 
+alter table public.people add column if not exists points_target integer;
+alter table public.people add column if not exists pocket_money_amount numeric(10, 2);
+alter table public.people add column if not exists pocket_money_owed numeric(10, 2);
+alter table public.people add column if not exists pocket_money_last_credited_week timestamptz;
+
+update public.people set pocket_money_amount = 0 where pocket_money_amount is null;
+update public.people set pocket_money_owed = 0 where pocket_money_owed is null;
+
+alter table public.people alter column pocket_money_amount set default 0;
+alter table public.people alter column pocket_money_owed set default 0;
+alter table public.people alter column pocket_money_amount set not null;
+alter table public.people alter column pocket_money_owed set not null;
+
 do $$
 begin
   if not exists (
@@ -138,6 +162,30 @@ begin
     alter table public.people
       add constraint people_color_hex_check
       check (color ~ '^#[0-9A-Fa-f]{6}$');
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'people_points_target_check'
+  ) then
+    alter table public.people
+      add constraint people_points_target_check
+      check (points_target is null or points_target >= 0);
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'people_pocket_money_amount_check'
+  ) then
+    alter table public.people
+      add constraint people_pocket_money_amount_check
+      check (pocket_money_amount >= 0);
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'people_pocket_money_owed_check'
+  ) then
+    alter table public.people
+      add constraint people_pocket_money_owed_check
+      check (pocket_money_owed >= 0);
   end if;
 end $$;
 

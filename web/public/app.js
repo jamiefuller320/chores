@@ -1688,15 +1688,121 @@ async function listLegacySupabase(status) {
   return (rows ?? []).map(rowToLegacyChore);
 }
 
+function isOpenLikeInstanceStatus(status) {
+  return status === "noticed" || status === "open" || status === "assigned";
+}
+
+function isLiveInstanceStatus(status) {
+  return isOpenLikeInstanceStatus(status) || status === "waiting";
+}
+
+/**
+ * Daily miss rule: one open cycle per template. Retire extra open/assigned/
+ * noticed rows (keep newest) and drop waiting rows that would promote into a
+ * second open copy while one is already live.
+ */
+function pickDuplicateInstanceRetires(instanceRows) {
+  const rows = instanceRows ?? [];
+  const byTemplate = new Map();
+  for (const row of rows) {
+    const templateId = row.template_id ?? row.templateId;
+    if (!templateId || !isLiveInstanceStatus(row.status)) continue;
+    const list = byTemplate.get(templateId) || [];
+    list.push(row);
+    byTemplate.set(templateId, list);
+  }
+  const retireIds = new Set();
+  for (const list of byTemplate.values()) {
+    const openLike = list
+      .filter((row) => isOpenLikeInstanceStatus(row.status))
+      .sort((a, b) => {
+        const aMs = Date.parse(a.created_at || a.createdAt || 0) || 0;
+        const bMs = Date.parse(b.created_at || b.createdAt || 0) || 0;
+        return bMs - aMs;
+      });
+    for (const extra of openLike.slice(1)) {
+      retireIds.add(extra.id);
+    }
+    const keepOpen = openLike[0] || null;
+    if (keepOpen) {
+      for (const row of list) {
+        if (row.status === "waiting") retireIds.add(row.id);
+      }
+    } else {
+      const waiting = list
+        .filter((row) => row.status === "waiting")
+        .sort((a, b) => {
+          const aMs = Date.parse(a.created_at || a.createdAt || 0) || 0;
+          const bMs = Date.parse(b.created_at || b.createdAt || 0) || 0;
+          return bMs - aMs;
+        });
+      for (const extra of waiting.slice(1)) {
+        retireIds.add(extra.id);
+      }
+    }
+  }
+  return [...retireIds];
+}
+
+async function retireDuplicateTemplateInstancesRich(instanceRows) {
+  const ids = pickDuplicateInstanceRetires(instanceRows);
+  if (ids.length === 0) return false;
+  await Promise.all(
+    ids.map((id) =>
+      supabaseRequest(`task_instances?id=eq.${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({ status: "retired" }),
+      }).catch((error) => {
+        console.warn("Retire duplicate instance failed", id, error);
+      }),
+    ),
+  );
+  return true;
+}
+
+function retireDuplicateTemplateInstancesLocal(store) {
+  const ids = new Set(
+    pickDuplicateInstanceRetires(
+      (store.instances ?? []).map((row) => ({
+        id: row.id,
+        template_id: row.templateId ?? row.template_id,
+        status: row.status,
+        created_at: row.createdAt ?? row.created_at,
+      })),
+    ),
+  );
+  if (ids.size === 0) return { store, changed: false };
+  const instances = store.instances.map((row) =>
+    ids.has(row.id) ? { ...row, status: "retired" } : row,
+  );
+  return { store: { ...store, instances }, changed: true };
+}
+
 async function promoteDueWaitingRich(instanceRows) {
   const now = Date.now();
+  const openTemplateIds = new Set(
+    (instanceRows ?? [])
+      .filter((row) => isOpenLikeInstanceStatus(row.status) && row.template_id)
+      .map((row) => row.template_id),
+  );
   const due = (instanceRows ?? []).filter((row) => {
     if (row.status !== "waiting" || !row.due_at) return false;
+    if (row.template_id && openTemplateIds.has(row.template_id)) return false;
     const ms = Date.parse(row.due_at);
     return !Number.isNaN(ms) && ms <= now;
   });
+  // One promote per template even if several waiting rows are due.
+  const seenTemplates = new Set();
+  const toPromote = [];
+  for (const row of due) {
+    const templateId = row.template_id || row.id;
+    if (seenTemplates.has(templateId)) continue;
+    seenTemplates.add(templateId);
+    toPromote.push(row);
+  }
   await Promise.all(
-    due.map((row) =>
+    toPromote.map((row) =>
       supabaseRequest(`task_instances?id=eq.${encodeURIComponent(row.id)}`, {
         method: "PATCH",
         headers: { Prefer: "return=minimal" },
@@ -1710,7 +1816,7 @@ async function promoteDueWaitingRich(instanceRows) {
       }).catch(() => null),
     ),
   );
-  return due.length > 0;
+  return toPromote.length > 0;
 }
 
 async function releaseExpiredClaimsRich(instanceRows) {
@@ -2170,9 +2276,14 @@ async function fetchRichBoard(status) {
   let rows = instanceRows;
   const healedDone = await healCompletedStillOpenRich(instanceRows);
   const retiredJunk = await retireAgentTestJunkRich(instanceRows);
-  const promoted = await promoteDueWaitingRich(instanceRows);
-  const released = await releaseExpiredClaimsRich(instanceRows);
-  if (healedDone || retiredJunk || promoted || released) {
+  const retiredDupes = await retireDuplicateTemplateInstancesRich(instanceRows);
+  const afterDedupe =
+    healedDone || retiredJunk || retiredDupes
+      ? await supabaseRequest("task_instances?select=*&order=created_at.desc")
+      : instanceRows;
+  const promoted = await promoteDueWaitingRich(afterDedupe);
+  const released = await releaseExpiredClaimsRich(afterDedupe);
+  if (healedDone || retiredJunk || retiredDupes || promoted || released) {
     rows = await supabaseRequest(
       "task_instances?select=*&order=created_at.desc",
     );
@@ -2929,6 +3040,17 @@ async function scheduleNextRich(chore, completedAt) {
   if (!template || template.kind === "once" || template.active === false) {
     return;
   }
+  // Daily miss / no duplicate cycle: skip spawn when this template already
+  // has an open, assigned, noticed, or waiting instance (excluding the one
+  // just completed).
+  try {
+    const existing = await supabaseRequest(
+      `task_instances?select=id,status&template_id=eq.${encodeURIComponent(template.id)}&status=in.(noticed,open,assigned,waiting)&id=neq.${encodeURIComponent(chore.id)}&limit=1`,
+    );
+    if (existing?.length) return;
+  } catch (error) {
+    console.warn("Duplicate-cycle check failed", error);
+  }
   const dueAt = nextDueAt(
     completedAt,
     template.kind,
@@ -3024,6 +3146,19 @@ async function completeRich(chore, options = {}) {
       );
     } catch {
       /* best-effort */
+    }
+    // Collapse duplicate open cycles so scheduleNext can raise the next day.
+    try {
+      await supabaseRequest(
+        `task_instances?template_id=eq.${encodeURIComponent(chore.templateId)}&id=neq.${encodeURIComponent(chore.id)}&status=in.(noticed,open,assigned)`,
+        {
+          method: "PATCH",
+          headers: { Prefer: "return=minimal" },
+          body: JSON.stringify({ status: "retired" }),
+        },
+      );
+    } catch (error) {
+      console.warn("Retire sibling open instances failed", error);
     }
   }
   try {
@@ -3235,13 +3370,27 @@ function releaseLocalClaims(store) {
 function promoteLocalWaiting(store) {
   const now = Date.now();
   let changed = false;
+  const openTemplateIds = new Set(
+    (store.instances ?? [])
+      .filter(
+        (row) =>
+          isOpenLikeInstanceStatus(row.status) &&
+          (row.templateId || row.template_id),
+      )
+      .map((row) => row.templateId || row.template_id),
+  );
+  const promotedTemplates = new Set();
   const instances = store.instances.map((row) => {
     const status = row.status;
     const dueAt = row.dueAt ?? row.due_at;
+    const templateId = row.templateId || row.template_id;
     if (status !== "waiting" || !dueAt) return row;
+    if (templateId && openTemplateIds.has(templateId)) return row;
+    if (templateId && promotedTemplates.has(templateId)) return row;
     const ms = Date.parse(dueAt);
     if (Number.isNaN(ms) || ms > now) return row;
     changed = true;
+    if (templateId) promotedTemplates.add(templateId);
     const next = clearLocalHold(row);
     next.openedAt = new Date().toISOString();
     return next;
@@ -3402,14 +3551,19 @@ function applyLocalWeeklyPointsReset(store) {
 }
 
 function listLocal(status) {
-  let store = applyLocalWeeklyPointsReset(
-    releaseLocalClaims(promoteLocalWaiting(loadLocalV2())),
+  let store = loadLocalV2();
+  const dupePass = retireDuplicateTemplateInstancesLocal(store);
+  store = dupePass.store;
+  store = applyLocalWeeklyPointsReset(
+    releaseLocalClaims(promoteLocalWaiting(store)),
   );
   const healPass = healCompletedStillOpenLocal(store);
   store = healPass.store;
   const junkPass = retireAgentTestJunkLocal(store);
   store = junkPass.store;
-  if (healPass.changed || junkPass.changed) saveLocalV2(store);
+  if (dupePass.changed || healPass.changed || junkPass.changed) {
+    saveLocalV2(store);
+  }
   people = store.people.map((p) => toPersonView(p)).filter(Boolean);
   templatesById = new Map(
     store.templates.map((t) => [
@@ -5222,6 +5376,120 @@ async function saveEditTask(chore, input) {
   }
 }
 
+/** Soft-delete: deactivate template (if any) and retire live instances. */
+async function deleteRichTask(chore) {
+  const now = new Date().toISOString();
+  if (chore.templateId) {
+    await supabaseRequest(
+      `task_templates?id=eq.${encodeURIComponent(chore.templateId)}`,
+      {
+        method: "PATCH",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({ active: false }),
+      },
+    );
+    const prev = templatesById.get(chore.templateId);
+    if (prev) templatesById.set(chore.templateId, { ...prev, active: false });
+    await supabaseRequest(
+      `task_instances?template_id=eq.${encodeURIComponent(chore.templateId)}&status=in.(noticed,open,assigned,waiting)`,
+      {
+        method: "PATCH",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({ status: "retired" }),
+      },
+    );
+  } else {
+    await supabaseRequest(
+      `task_instances?id=eq.${encodeURIComponent(chore.id)}`,
+      {
+        method: "PATCH",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({ status: "retired" }),
+      },
+    );
+  }
+  try {
+    await supabaseRequest(`chores?id=eq.${encodeURIComponent(chore.id)}`, {
+      method: "PATCH",
+      headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({ status: "done", completed_at: now }),
+    });
+  } catch {
+    /* optional legacy mirror */
+  }
+}
+
+function deleteLocalTask(chore) {
+  const store = loadLocalV2();
+  if (chore.templateId) {
+    store.templates = store.templates.map((row) =>
+      row.id === chore.templateId ? { ...row, active: false } : row,
+    );
+    store.instances = store.instances.map((row) => {
+      const templateId = row.templateId ?? row.template_id;
+      if (
+        templateId === chore.templateId &&
+        isLiveInstanceStatus(row.status)
+      ) {
+        return { ...row, status: "retired" };
+      }
+      return row;
+    });
+  } else {
+    store.instances = store.instances.map((row) =>
+      row.id === chore.id ? { ...row, status: "retired" } : row,
+    );
+  }
+  saveLocalV2(store);
+}
+
+function applyDeletedChoreLocally(chore) {
+  if (!chore?.id) return;
+  const templateId = chore.templateId;
+  chores = chores.filter((row) => {
+    if (templateId && row.templateId === templateId) return false;
+    return row.id !== chore.id;
+  });
+  recentCreates.delete(String(chore.id));
+  lastBoardFingerprint = boardFingerprint();
+  writeSwrCache();
+  render();
+}
+
+async function deleteEditTask(chore) {
+  if (!chore) return;
+  const label = chore.title ? `"${chore.title}"` : "this task";
+  const ok = window.confirm(
+    `Delete ${label}? It will leave the Open list. Completion history is kept.`,
+  );
+  if (!ok) return;
+  pendingEdit = null;
+  editDialog?.close();
+  try {
+    setStatus("Deleting…");
+    if (backend === "supabase-rich") {
+      await deleteRichTask(chore);
+    } else if (backend === "local") {
+      deleteLocalTask(chore);
+    } else if (backend === "supabase") {
+      await supabaseRequest(`chores?id=eq.${encodeURIComponent(chore.id)}`, {
+        method: "DELETE",
+        headers: { Prefer: "return=minimal" },
+      });
+    } else {
+      throw new Error("Delete needs Supabase or local mode.");
+    }
+    applyDeletedChoreLocally(chore);
+    setStatus("Task deleted.", { tone: "ok" });
+    loadEpoch += 1;
+    await loadChores({ quiet: true });
+  } catch (error) {
+    pendingEdit = chore;
+    setStatus(error.message, { tone: "error" });
+    if (typeof editDialog.showModal === "function") editDialog.showModal();
+  }
+}
+
 async function claimChore(chore) {
   try {
     if (backend === "supabase-rich") {
@@ -5442,24 +5710,47 @@ async function finishComplete(chore, options = {}) {
           : {}),
         createdAt: now,
       });
-      if (template && template.kind !== "once") {
-        const dueAt = nextDueAt(
-          now,
-          template.kind,
-          template.recurrenceInterval ?? template.recurrence_interval,
-          template.recurrenceUnit ?? template.recurrence_unit,
-        );
-        store.instances.push({
-          id: newId("inst"),
-          templateId: template.id,
-          title: template.title,
-          status: "waiting",
-          dueAt,
-          openedAt: now,
-          createdAt: now,
-          source: "schedule",
-          estimatedMinutes: template.estimatedMinutes ?? 10,
+      if (chore.templateId) {
+        store.instances = store.instances.map((row) => {
+          const templateId = row.templateId ?? row.template_id;
+          if (
+            templateId === chore.templateId &&
+            row.id !== chore.id &&
+            isOpenLikeInstanceStatus(row.status)
+          ) {
+            return { ...row, status: "retired" };
+          }
+          return row;
         });
+      }
+      if (template && template.kind !== "once" && template.active !== false) {
+        const hasLive = store.instances.some((row) => {
+          const templateId = row.templateId ?? row.template_id;
+          return (
+            templateId === template.id &&
+            row.id !== chore.id &&
+            isLiveInstanceStatus(row.status)
+          );
+        });
+        if (!hasLive) {
+          const dueAt = nextDueAt(
+            now,
+            template.kind,
+            template.recurrenceInterval ?? template.recurrence_interval,
+            template.recurrenceUnit ?? template.recurrence_unit,
+          );
+          store.instances.push({
+            id: newId("inst"),
+            templateId: template.id,
+            title: template.title,
+            status: "waiting",
+            dueAt,
+            openedAt: now,
+            createdAt: now,
+            source: "schedule",
+            estimatedMinutes: template.estimatedMinutes ?? 10,
+          });
+        }
       }
       saveLocalV2(store);
     }
@@ -5757,6 +6048,14 @@ editForm.addEventListener("submit", (event) => {
 document.querySelector("#edit-cancel")?.addEventListener("click", () => {
   pendingEdit = null;
   editDialog?.close();
+});
+
+document.querySelector("#edit-delete")?.addEventListener("click", () => {
+  if (!pendingEdit) {
+    editDialog?.close();
+    return;
+  }
+  void deleteEditTask(pendingEdit);
 });
 
 document.querySelector("#edit-save")?.addEventListener("click", () => {

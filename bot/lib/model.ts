@@ -622,32 +622,59 @@ export function completeInstance(
   const instances = store.instances.slice();
   instances[index] = next;
 
+  // Collapse duplicate open cycles for this template (daily miss = one live).
+  if (current.templateId) {
+    for (let i = 0; i < instances.length; i += 1) {
+      const row = instances[i]!;
+      if (
+        row.id !== current.id &&
+        row.templateId === current.templateId &&
+        (row.status === "noticed" ||
+          row.status === "open" ||
+          row.status === "assigned")
+      ) {
+        instances[i] = { ...row, status: "retired" };
+      }
+    }
+  }
+
   let nextInstance: TaskInstance | undefined;
   const template = current.templateId
     ? store.templates.find((t) => t.id === current.templateId)
     : undefined;
   if (template && template.kind !== "once" && template.active) {
-    const dueAt = nextDueAt(
-      now,
-      template.kind,
-      template.recurrenceInterval,
-      template.recurrenceUnit,
+    const hasLive = instances.some(
+      (row) =>
+        row.id !== current.id &&
+        row.templateId === template.id &&
+        (row.status === "noticed" ||
+          row.status === "open" ||
+          row.status === "assigned" ||
+          row.status === "waiting"),
     );
-    nextInstance = {
-      id: newId("inst"),
-      templateId: template.id,
-      title: template.title,
-      ...(template.description ? { description: template.description } : {}),
-      ...(template.estimatedMinutes !== undefined
-        ? { estimatedMinutes: template.estimatedMinutes }
-        : {}),
-      status: "waiting",
-      openedAt: now,
-      ...(dueAt ? { dueAt } : {}),
-      source: "schedule",
-      createdAt: now,
-    };
-    instances.push(nextInstance);
+    if (!hasLive) {
+      const dueAt = nextDueAt(
+        now,
+        template.kind,
+        template.recurrenceInterval,
+        template.recurrenceUnit,
+      );
+      nextInstance = {
+        id: newId("inst"),
+        templateId: template.id,
+        title: template.title,
+        ...(template.description ? { description: template.description } : {}),
+        ...(template.estimatedMinutes !== undefined
+          ? { estimatedMinutes: template.estimatedMinutes }
+          : {}),
+        status: "waiting",
+        openedAt: now,
+        ...(dueAt ? { dueAt } : {}),
+        source: "schedule",
+        createdAt: now,
+      };
+      instances.push(nextInstance);
+    }
   }
 
   return {
@@ -1048,11 +1075,30 @@ export function promoteDueWaiting(
 ): HouseholdModelStore {
   const now = Date.parse(nowIso);
   let changed = false;
+  const openTemplateIds = new Set(
+    store.instances
+      .filter(
+        (instance) =>
+          Boolean(instance.templateId) &&
+          (instance.status === "noticed" ||
+            instance.status === "open" ||
+            instance.status === "assigned"),
+      )
+      .map((instance) => instance.templateId as string),
+  );
+  const promotedTemplates = new Set<string>();
   const instances = store.instances.map((instance) => {
     if (instance.status !== "waiting" || !instance.dueAt) return instance;
+    if (instance.templateId && openTemplateIds.has(instance.templateId)) {
+      return instance;
+    }
+    if (instance.templateId && promotedTemplates.has(instance.templateId)) {
+      return instance;
+    }
     const due = Date.parse(instance.dueAt);
     if (Number.isNaN(due) || due > now) return instance;
     changed = true;
+    if (instance.templateId) promotedTemplates.add(instance.templateId);
     const next: TaskInstance = {
       ...instance,
       status: "open",

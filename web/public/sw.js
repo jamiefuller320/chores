@@ -1,5 +1,5 @@
 /** Bump CACHE when shell assets change so iPhone PWAs drop stale app.js. */
-const CACHE = "chores-shell-v9";
+const CACHE = "chores-shell-v10";
 const BASE = new URL("./", self.location.href);
 const ASSETS = [
   "./",

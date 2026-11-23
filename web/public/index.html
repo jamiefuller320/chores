@@ -315,8 +315,8 @@
 
     <dialog id="edit-dialog" class="sheet">
       <form method="dialog" id="edit-form" class="sheet-body">
-        <h2 class="sheet-title">Edit task</h2>
-        <p class="sheet-subtitle">Change anything about this chore.</p>
+        <h2 class="sheet-title" id="edit-sheet-title">Edit task</h2>
+        <p class="sheet-subtitle" id="edit-sheet-subtitle">Change anything about this chore.</p>
         <label class="field-label" for="edit-title">Title</label>
         <input id="edit-title" name="title" type="text" required maxlength="120" />
         <label class="field-label" for="edit-description">Description</label>
@@ -382,7 +382,10 @@
         </div>
         <p id="edit-ref-hint" class="field-hint"></p>
         <div class="sheet-actions">
-          <button type="button" id="edit-delete" class="danger">Delete</button>
+          <div class="sheet-actions-start">
+            <button type="button" id="edit-delete" class="danger">Delete</button>
+            <button type="button" id="edit-duplicate" class="ghost">Duplicate</button>
+          </div>
           <div class="sheet-actions-end">
             <button type="button" id="edit-cancel" class="ghost">Cancel</button>
             <button type="button" id="edit-save" class="primary">Save</button>
@@ -416,7 +419,7 @@
       </div>
     </dialog>
 
-    <script src="./config.js?v=20261115b"></script>
-    <script src="./app.js?v=20261115b" type="module"></script>
+    <script src="./config.js?v=20261116a"></script>
+    <script src="./app.js?v=20261116a" type="module"></script>
   </body>
 </html>

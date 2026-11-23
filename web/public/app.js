@@ -58,6 +58,8 @@ const referenceOpenCameraBtn = document.querySelector("#reference-open-camera");
 const referenceCameraStatus = document.querySelector("#reference-camera-status");
 const editDialog = document.querySelector("#edit-dialog");
 const editForm = document.querySelector("#edit-form");
+const editSheetTitle = document.querySelector("#edit-sheet-title");
+const editSheetSubtitle = document.querySelector("#edit-sheet-subtitle");
 const editTitleInput = document.querySelector("#edit-title");
 const editDescriptionInput = document.querySelector("#edit-description");
 const editAssigneeInput = document.querySelector("#edit-assignee");
@@ -80,6 +82,8 @@ const editStepsInput = document.querySelector("#edit-steps");
 const editReferencePhotoInput = document.querySelector("#edit-referencePhoto");
 const editReferenceOpenCameraBtn = document.querySelector("#edit-reference-open-camera");
 const editRefHint = document.querySelector("#edit-ref-hint");
+const editDeleteBtn = document.querySelector("#edit-delete");
+const editDuplicateBtn = document.querySelector("#edit-duplicate");
 const cameraDialog = document.querySelector("#camera-dialog");
 const sharedVideo = document.querySelector("#shared-video");
 const sharedPreview = document.querySelector("#shared-preview");
@@ -283,6 +287,12 @@ let pollTimer = null;
 let pendingComplete = null;
 /** @type {Record<string, unknown> | null} */
 let pendingEdit = null;
+/** Edit sheet: normal PATCH vs create-from-copy (Duplicate). */
+/** @type {"edit" | "duplicate"} */
+let editMode = "edit";
+/** Source reference photo path kept when Duplicate copies without a new file. */
+/** @type {string | null} */
+let duplicateSourceRefPath = null;
 /** @type {Record<string, unknown> | null} */
 let pendingTaskCard = null;
 /** @type {boolean} */
@@ -2398,6 +2408,9 @@ async function addRichSupabase(input) {
   let referencePath = null;
   if (input.referenceFile) {
     referencePath = await uploadPhoto(input.referenceFile, "reference");
+  } else if (input.referencePhotoPath) {
+    // Duplicate / copy: reuse the source template's reference object.
+    referencePath = input.referencePhotoPath;
   }
   const kind = input.kind || "once";
   const recurrence = resolveRecurrence(
@@ -5139,12 +5152,74 @@ async function addHouseholdPerson(nameEl, roleEl) {
   }
 }
 
+function syncEditDialogMode() {
+  const duplicating = editMode === "duplicate";
+  if (editSheetTitle) {
+    editSheetTitle.textContent = duplicating
+      ? "Duplicate task"
+      : "Edit task";
+  }
+  if (editSheetSubtitle) {
+    editSheetSubtitle.textContent = duplicating
+      ? "Edit fields, then Save to create a new chore. The original stays as it is."
+      : "Change anything about this chore.";
+  }
+  if (editDeleteBtn) {
+    editDeleteBtn.hidden = duplicating;
+    editDeleteBtn.disabled = duplicating;
+  }
+  if (editDuplicateBtn) {
+    editDuplicateBtn.hidden = duplicating;
+    editDuplicateBtn.disabled = duplicating;
+  }
+  if (editRefHint) {
+    if (duplicating) {
+      editRefHint.textContent = duplicateSourceRefPath
+        ? "Reference photo will be copied — choose a file only to replace it."
+        : "Optional: add a “what good looks like” photo.";
+    } else if (pendingEdit?.referencePhotoPath) {
+      editRefHint.textContent =
+        "A reference photo is already set — choose a file only to replace it.";
+    } else {
+      editRefHint.textContent =
+        "Optional: add a “what good looks like” photo.";
+    }
+  }
+}
+
+function resetEditDialogMode() {
+  editMode = "edit";
+  duplicateSourceRefPath = null;
+  syncEditDialogMode();
+}
+
+function enterDuplicateEditMode() {
+  if (!pendingEdit) return;
+  if (backend === "api") {
+    setStatus("Duplicate needs Supabase or local mode.");
+    return;
+  }
+  editMode = "duplicate";
+  duplicateSourceRefPath =
+    pendingEdit.referencePhotoPath ||
+    (pendingEdit.templateId
+      ? templatesById.get(pendingEdit.templateId)?.reference_photo_path
+      : null) ||
+    null;
+  editReferencePhotoInput.value = "";
+  syncEditDialogMode();
+  setStatus("Duplicating — edit fields, then Save to add a new task.");
+  editTitleInput?.focus();
+}
+
 function openEditDialog(chore) {
   if (backend === "api") {
     setStatus("Edit needs Supabase or local mode.");
     return;
   }
   pendingEdit = chore;
+  editMode = "edit";
+  duplicateSourceRefPath = null;
   editTitleInput.value = chore.title || "";
   editDescriptionInput.value = chore.description || "";
   editAssigneeInput.value = chore.assignee || "";
@@ -5174,9 +5249,7 @@ function openEditDialog(chore) {
   editDueDateInput.value = chore.dueDate || "";
   editStepsInput.value = stepsToTextarea(chore.steps);
   editReferencePhotoInput.value = "";
-  editRefHint.textContent = chore.referencePhotoPath
-    ? "A reference photo is already set — choose a file only to replace it."
-    : "Optional: add a “what good looks like” photo.";
+  syncEditDialogMode();
   syncComposerAdminUi();
   if (typeof editDialog.showModal === "function") {
     editDialog.showModal();
@@ -5191,6 +5264,7 @@ function collectEditPayload() {
     Number(editRecurrenceIntervalInput.value) || undefined,
     editRecurrenceUnitInput.value || DEFAULT_PERIODIC_UNIT,
   );
+  const referenceFile = editReferencePhotoInput.files?.[0] ?? null;
   return {
     title: editTitleInput.value.trim(),
     description: editDescriptionInput.value.trim() || undefined,
@@ -5199,14 +5273,136 @@ function collectEditPayload() {
     kind: selected.kind,
     recurrenceInterval: selected.recurrenceInterval,
     recurrenceUnit: selected.recurrenceUnit,
+    cooldownDays: selected.cooldownDays,
     points: Math.max(
       0,
       Math.floor(Number(editPointsInput.value) || DEFAULT_TASK_POINTS),
     ),
     dueDate: editDueDateInput.value || undefined,
     steps: parseSteps(editStepsInput.value),
-    referenceFile: editReferencePhotoInput.files?.[0] ?? null,
+    referenceFile,
+    // Duplicate create: carry source reference when no replacement file.
+    referencePhotoPath:
+      !referenceFile && editMode === "duplicate" && duplicateSourceRefPath
+        ? duplicateSourceRefPath
+        : undefined,
   };
+}
+
+/** Same create path as New task — used by composer Add and Duplicate Save. */
+async function createTaskFromPayload(payload) {
+  if (backend === "supabase-rich") {
+    const created = await addRichSupabase(payload);
+    if (payload.assignee) await findOrCreatePerson(payload.assignee);
+    return created;
+  }
+  if (backend === "supabase") {
+    return addLegacySupabase(payload);
+  }
+  if (backend === "api") {
+    const data = await api("api/chores", {
+      method: "POST",
+      body: JSON.stringify({
+        title: payload.title,
+        assignee: payload.assignee,
+        dueDate: payload.dueDate,
+      }),
+    });
+    return data.chore ? { ...data.chore, mode: "legacy" } : null;
+  }
+  if (backend !== "local") {
+    throw new Error("Create needs Supabase or local mode.");
+  }
+  const store = loadLocalV2();
+  const now = new Date().toISOString();
+  let person = null;
+  if (payload.assignee) {
+    person = store.people.find(
+      (p) =>
+        (p.displayName || p.display_name || "").toLowerCase() ===
+        payload.assignee.toLowerCase(),
+    );
+    if (!person) {
+      person = {
+        id: newId("person"),
+        displayName: payload.assignee,
+        role: "child",
+        active: true,
+        createdAt: now,
+      };
+      store.people.push(person);
+    }
+  }
+  const templateId = newId("tmpl");
+  let referencePath = null;
+  if (payload.referenceFile) {
+    referencePath = await fileToDataUrl(payload.referenceFile);
+  } else if (payload.referencePhotoPath) {
+    referencePath = payload.referencePhotoPath;
+  }
+  const recurrence = resolveRecurrence(
+    payload.kind || "once",
+    payload.recurrenceInterval,
+    payload.recurrenceUnit,
+  );
+  store.templates.push({
+    id: templateId,
+    title: payload.title,
+    description: payload.description,
+    kind: payload.kind,
+    recurrenceInterval: payload.recurrenceInterval,
+    recurrenceUnit: payload.recurrenceUnit,
+    cooldownDays: payload.cooldownDays ?? recurrence.cooldownDays,
+    points: payload.points,
+    steps: payload.steps,
+    referencePhotoPath: referencePath,
+    estimatedMinutes: 10,
+    effortWeight: 1,
+    createdFrom: "manual",
+    active: true,
+    createdAt: now,
+  });
+  const instanceId = newId("inst");
+  store.instances.push({
+    id: instanceId,
+    templateId,
+    title: payload.title,
+    description: payload.description,
+    status: person ? "assigned" : "open",
+    assigneePersonId: person?.id,
+    assignee: person?.displayName,
+    dueDate: payload.dueDate,
+    ...(person && payload.completeBy
+      ? { completeBy: payload.completeBy }
+      : {}),
+    createdAt: now,
+    source: "manual",
+  });
+  saveLocalV2(store);
+  return instanceToView(
+    {
+      id: instanceId,
+      template_id: templateId,
+      title: payload.title,
+      description: payload.description,
+      status: person ? "assigned" : "open",
+      assignee: person?.displayName,
+      due_date: payload.dueDate,
+      complete_by:
+        person && payload.completeBy ? payload.completeBy : undefined,
+      created_at: now,
+    },
+    {
+      id: templateId,
+      title: payload.title,
+      kind: payload.kind,
+      recurrence_interval: payload.recurrenceInterval,
+      recurrence_unit: payload.recurrenceUnit,
+      points: payload.points,
+      steps: payload.steps,
+      reference_photo_path: referencePath,
+    },
+  );
 }
 
 async function updateLocalTask(chore, input) {
@@ -5337,7 +5533,57 @@ async function updateLegacyTask(chore, input) {
   });
 }
 
+async function saveDuplicateTask(input) {
+  if (!input.title) {
+    setStatus("Title is required.", { tone: "error" });
+    if (typeof editDialog.showModal === "function") editDialog.showModal();
+    return;
+  }
+  const holdError = assignmentHoldError(input.assignee, input.completeBy);
+  if (holdError) {
+    setStatus(holdError, { tone: "error" });
+    if (typeof editDialog.showModal === "function") editDialog.showModal();
+    return;
+  }
+  const source = pendingEdit;
+  pendingEdit = null;
+  editMode = "edit";
+  duplicateSourceRefPath = null;
+  try {
+    setStatus("Creating copy…");
+    const created = await createTaskFromPayload(input);
+    if (!created?.id) {
+      throw new Error("Save returned no task — nothing was added.");
+    }
+    showCreatedTaskOnList(created);
+    setStatus(`Duplicated “${created.title}”.`, { tone: "ok" });
+    // Bump epoch so a stale poll cannot drop the new row / flash ghosts.
+    loadEpoch += 1;
+    try {
+      await loadChores({ quiet: true });
+      showCreatedTaskOnList(created);
+    } catch (refreshError) {
+      console.warn("Refresh after duplicate failed", refreshError);
+      showCreatedTaskOnList(created);
+    }
+  } catch (error) {
+    pendingEdit = source;
+    editMode = "duplicate";
+    duplicateSourceRefPath =
+      input.referencePhotoPath ||
+      source?.referencePhotoPath ||
+      null;
+    syncEditDialogMode();
+    setStatus(error.message, { tone: "error" });
+    if (typeof editDialog.showModal === "function") editDialog.showModal();
+  }
+}
+
 async function saveEditTask(chore, input) {
+  if (editMode === "duplicate") {
+    await saveDuplicateTask(input);
+    return;
+  }
   if (!input.title) {
     pendingEdit = chore;
     setStatus("Title is required.", { tone: "error" });
@@ -5458,12 +5704,14 @@ function applyDeletedChoreLocally(chore) {
 
 async function deleteEditTask(chore) {
   if (!chore) return;
+  if (editMode === "duplicate") return;
   const label = chore.title ? `"${chore.title}"` : "this task";
   const ok = window.confirm(
     `Delete ${label}? It will leave the Open list. Completion history is kept.`,
   );
   if (!ok) return;
   pendingEdit = null;
+  resetEditDialogMode();
   editDialog?.close();
   try {
     setStatus("Deleting…");
@@ -6047,10 +6295,17 @@ editForm.addEventListener("submit", (event) => {
 
 document.querySelector("#edit-cancel")?.addEventListener("click", () => {
   pendingEdit = null;
+  resetEditDialogMode();
   editDialog?.close();
 });
 
+editDialog?.addEventListener("close", () => {
+  // Leaving the sheet abandons duplicate mode without writing.
+  if (!pendingEdit) resetEditDialogMode();
+});
+
 document.querySelector("#edit-delete")?.addEventListener("click", () => {
+  if (editMode === "duplicate") return;
   if (!pendingEdit) {
     editDialog?.close();
     return;
@@ -6058,8 +6313,13 @@ document.querySelector("#edit-delete")?.addEventListener("click", () => {
   void deleteEditTask(pendingEdit);
 });
 
+editDuplicateBtn?.addEventListener("click", () => {
+  if (!pendingEdit || editMode === "duplicate") return;
+  enterDuplicateEditMode();
+});
+
 document.querySelector("#edit-save")?.addEventListener("click", () => {
-  if (!pendingEdit) {
+  if (!pendingEdit && editMode !== "duplicate") {
     editDialog?.close();
     return;
   }
@@ -6125,107 +6385,10 @@ form.addEventListener("submit", async (event) => {
       submit.disabled = false;
       return;
     }
-    let created = null;
-    if (backend === "supabase-rich") {
-      created = await addRichSupabase(payload);
-      if (payload.assignee) await findOrCreatePerson(payload.assignee);
-    } else if (backend === "supabase") {
-      created = await addLegacySupabase(payload);
-    } else if (backend === "api") {
-      const data = await api("api/chores", {
-        method: "POST",
-        body: JSON.stringify({
-          title: payload.title,
-          assignee: payload.assignee,
-          dueDate: payload.dueDate,
-        }),
-      });
-      created = data.chore ? { ...data.chore, mode: "legacy" } : null;
-    } else {
-      const store = loadLocalV2();
-      const now = new Date().toISOString();
-      let person = null;
-      if (payload.assignee) {
-        person = store.people.find(
-          (p) =>
-            (p.displayName || p.display_name || "").toLowerCase() ===
-            payload.assignee.toLowerCase(),
-        );
-        if (!person) {
-          person = {
-            id: newId("person"),
-            displayName: payload.assignee,
-            role: "child",
-            active: true,
-            createdAt: now,
-          };
-          store.people.push(person);
-        }
-      }
-      const templateId = newId("tmpl");
-      let referencePath = null;
-      if (payload.referenceFile) {
-        referencePath = await fileToDataUrl(payload.referenceFile);
-      }
-      store.templates.push({
-        id: templateId,
-        title: payload.title,
-        description: payload.description,
-        kind: payload.kind,
-        recurrenceInterval: payload.recurrenceInterval,
-        recurrenceUnit: payload.recurrenceUnit,
-        cooldownDays: selected.cooldownDays,
-        points: payload.points,
-        steps: payload.steps,
-        referencePhotoPath: referencePath,
-        estimatedMinutes: 10,
-        effortWeight: 1,
-        createdFrom: "manual",
-        active: true,
-        createdAt: now,
-      });
-      const instanceId = newId("inst");
-      store.instances.push({
-        id: instanceId,
-        templateId,
-        title: payload.title,
-        description: payload.description,
-        status: person ? "assigned" : "open",
-        assigneePersonId: person?.id,
-        assignee: person?.displayName,
-        dueDate: payload.dueDate,
-        ...(person && payload.completeBy
-          ? { completeBy: payload.completeBy }
-          : {}),
-        createdAt: now,
-        source: "manual",
-      });
-      saveLocalV2(store);
-      created = instanceToView(
-        {
-          id: instanceId,
-          template_id: templateId,
-          title: payload.title,
-          description: payload.description,
-          status: person ? "assigned" : "open",
-          assignee: person?.displayName,
-          due_date: payload.dueDate,
-          complete_by:
-            person && payload.completeBy ? payload.completeBy : undefined,
-          created_at: now,
-        },
-        {
-          id: templateId,
-          title: payload.title,
-          kind: payload.kind,
-          recurrence_interval: payload.recurrenceInterval,
-          recurrence_unit: payload.recurrenceUnit,
-          points: payload.points,
-          steps: payload.steps,
-          reference_photo_path: referencePath,
-        },
-      );
-    }
+    const created = await createTaskFromPayload({
+      ...payload,
+      cooldownDays: selected.cooldownDays,
+    });
     if (!created?.id) {
       throw new Error("Save returned no task — nothing was added.");
     }
